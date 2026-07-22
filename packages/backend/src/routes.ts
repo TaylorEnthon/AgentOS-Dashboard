@@ -16,7 +16,7 @@ export function registerRoutes(
   app.get('/api/health', async () => ({
     ok: true,
     ts: new Date().toISOString(),
-    version: '0.5.0',
+    version: '0.6.0',
   }));
 
   app.get('/api/overview', async () => {
@@ -133,6 +133,24 @@ export function registerRoutes(
       usage: db.listUsageForSession(row.id),
       events: db.listEventsForSession(row.id).map(rowToEventDto),
     };
+  });
+
+  /* ---------------- v0.6 Git integration ---------------- */
+
+  app.get<{ Params: { id: string } }>('/api/git/sessions/:id', async (req, reply) => {
+    const session = db.getSession(req.params.id);
+    if (!session) return reply.code(404).send({ error: 'session not found' });
+    const project = session.project_display || session.project;
+    if (!project) {
+      return { repo: null, commits: [], reason: 'session has no project' };
+    }
+    const { getGitSessionInfo } = await import('./git-service.js');
+    try {
+      return await getGitSessionInfo(project, session.start_time, session.end_time ?? undefined);
+    } catch (err) {
+      app.log.warn({ err, sessionId: req.params.id }, 'git projection failed');
+      return reply.code(500).send({ error: 'git projection failed', detail: String(err) });
+    }
   });
 
   app.get('/api/projects', async () => db.listProjects());

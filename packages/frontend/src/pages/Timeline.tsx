@@ -13,7 +13,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { api, type AgentStatusDto, type TimelineItemDto } from '../lib/api';
+import {
+  api,
+  type AgentStatusDto,
+  type GitCommitDto,
+  type GitSessionInfoDto,
+  type TimelineItemDto,
+} from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -56,6 +62,7 @@ export function TimelinePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<TimelineItemDto[]>([]);
   const [agents, setAgents] = useState<AgentStatusDto[]>([]);
+  const [git, setGit] = useState<GitSessionInfoDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | undefined>(undefined);
@@ -72,10 +79,16 @@ export function TimelinePage() {
 
   const load = (silent = false) => {
     if (!silent) setRefreshing(true);
-    Promise.all([api.timeline(filters), api.agentStatus()])
-      .then(([tl, ag]) => {
+    // When a session is selected, also fetch its git projection so we can
+    // interleave commits with activity events in a single ordered feed.
+    const gitPromise = filters.session
+      ? api.gitSessionCommits(filters.session).catch(() => null)
+      : Promise.resolve(null);
+    Promise.all([api.timeline(filters), api.agentStatus(), gitPromise])
+      .then(([tl, ag, g]) => {
         setItems(tl);
         setAgents(ag);
+        setGit(g);
         setLastLoadedAt(new Date().toISOString());
         setErr(null);
       })
@@ -95,6 +108,14 @@ export function TimelinePage() {
     return () => clearInterval(t);
   }, [filters]);
 
+  // Merge events + git commits into a single sorted feed. Both already
+  // come back newest-first, so concat + re-sort is enough.
+  const mergedItems = useMemo<TimelineItemDto[]>(() => {
+    if (!git || git.commits.length === 0) return items;
+    const gitItems: TimelineItemDto[] = git.commits.map((c) => gitCommitToTimeline(c, filters, agents));
+    return [...items, ...gitItems].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [items, git, filters, agents]);
+
   const setFilter = (key: string, value: string | undefined): void => {
     const next = new URLSearchParams(searchParams);
     if (!value) next.delete(key);
@@ -104,9 +125,6 @@ export function TimelinePage() {
 
   const clearAll = (): void => setSearchParams(new URLSearchParams(), { replace: true });
 
-  // Group items by date so the UI can render day separators.
-  const grouped = useMemo(() => groupByDay(items), [items]);
-
   if (err) return <div className="p-6 text-rose-600">Failed to load: {err}</div>;
 
   return (
@@ -115,7 +133,7 @@ export function TimelinePage() {
         <div>
           <h1 className="text-2xl font-semibold">Timeline</h1>
           <p className="text-sm text-muted-foreground">
-            {items.length.toLocaleString()} events ·{' '}
+            {mergedItems.length.toLocaleString()} events ·{' '}
             <span className={cn(connected ? 'text-emerald-700' : 'text-muted-foreground')}>
               {connected ? 'live' : 'offline'}
             </span>{' '}
@@ -135,27 +153,40 @@ export function TimelinePage() {
         onClear={clearAll}
       />
 
-      {items.length === 0 ? (
+      {mergedItems.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
             No events match the current filters.
           </CardContent>
         </Card>
       ) : (
-        <ol className="relative space-y-6">
-          {grouped.map(({ day, items: dayItems }) => (
-            <li key={day} className="space-y-2">
-              <h3 className="sticky top-0 z-10 bg-background/80 px-1 py-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur">
-                {day}
-              </h3>
-              <ul className="space-y-1.5">
-                {dayItems.map((item) => (
-                  <TimelineRow key={item.id} item={item} />
-                ))}
-              </ul>
-            </li>
-          ))}
-        </ol>
+        <>
+          {git && git.repo && (
+            <GitRepoBanner info={git} />
+          )}
+          {git && !git.repo && git.reason && filters.session && (
+            <Card>
+              <CardContent className="py-3 text-xs text-muted-foreground">
+                <Badge tone="muted" className="mr-2">no git</Badge>
+                {git.reason}. Timeline shows activity events only.
+              </CardContent>
+            </Card>
+          )}
+          <ol className="relative space-y-6">
+            {groupByDay(mergedItems).map(({ day, items: dayItems }) => (
+              <li key={day} className="space-y-2">
+                <h3 className="sticky top-0 z-10 bg-background/80 px-1 py-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur">
+                  {day}
+                </h3>
+                <ul className="space-y-1.5">
+                  {dayItems.map((item) => (
+                    <TimelineRow key={item.id} item={item} />
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ol>
+        </>
       )}
     </div>
   );
@@ -243,6 +274,69 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
+}
+
+function GitRepoBanner({ info }: { info: GitSessionInfoDto }) {
+  if (!info.repo) return null;
+  return (
+    <Card>
+      <CardContent className="flex flex-wrap items-center gap-3 py-3 text-xs">
+        <Badge tone="success" className="uppercase">git</Badge>
+        <span className="font-mono text-foreground" title={info.repo.root}>
+          {info.repo.root}
+        </span>
+        {info.repo.branch && (
+          <span className="text-muted-foreground">
+            branch <span className="font-mono text-foreground">{info.repo.branch}</span>
+          </span>
+        )}
+        {info.repo.currentCommit && (
+          <span className="text-muted-foreground">
+            HEAD{' '}
+            <span className="font-mono text-foreground">
+              {info.repo.currentCommit.slice(0, 7)}
+            </span>
+          </span>
+        )}
+        <span className="ml-auto text-muted-foreground">
+          {info.commits.length} commit{info.commits.length === 1 ? '' : 's'} in window
+        </span>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Convert a GitCommit into a TimelineItem so the same row renderer can show it. */
+function gitCommitToTimeline(
+  c: GitCommitDto,
+  filters: Filters,
+  agents: AgentStatusDto[],
+): TimelineItemDto {
+  const agent = agents[0];
+  const agentId = agent?.agent ?? 'git';
+  return {
+    id: `git:${c.hash}`,
+    agentId,
+    agentType: 'git' as TimelineItemDto['agentType'],
+    sessionId: filters.session ?? '',
+    sessionTitle: null,
+    project: filters.project ?? '',
+    projectDisplay: filters.project ?? '',
+    timestamp: c.timestamp,
+    type: 'git-commit',
+    action: `Commit · ${c.shortHash}`,
+    detail: c.message,
+    meta: {
+      hash: c.hash,
+      shortHash: c.shortHash,
+      author: c.author,
+      authorEmail: c.authorEmail,
+      body: c.body,
+      filesChanged: c.filesChanged,
+      insertions: c.insertions,
+      deletions: c.deletions,
+    },
+  };
 }
 
 function TimelineRow({ item }: { item: TimelineItemDto }) {

@@ -192,6 +192,32 @@ export interface TimelineItemDto {
   meta?: Record<string, unknown> | null;
 }
 
+export interface GitCommitDto {
+  hash: string;
+  shortHash: string;
+  message: string;
+  body: string;
+  author: string;
+  authorEmail: string;
+  timestamp: string;
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface GitRepoDto {
+  root: string;
+  branch?: string;
+  currentCommit?: string;
+}
+
+export interface GitSessionInfoDto {
+  repo: GitRepoDto | null;
+  branch?: string;
+  commits: GitCommitDto[];
+  reason?: string;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -236,4 +262,7 @@ export const api = {
     Object.entries(params).forEach(([k, v]) => v !== undefined && v !== '' && q.set(k, String(v)));
     return http<TimelineItemDto[]>(`/api/timeline${q.toString() ? `?${q.toString()}` : ''}`);
   },
+
+  // v0.6
+  gitSessionCommits: (id: string) => http<GitSessionInfoDto>(`/api/git/sessions/${encodeURIComponent(id)}`),
 };

@@ -253,6 +253,42 @@ export interface TimelineItem {
   meta?: Record<string, unknown> | null;
 }
 
+/* ---------------- v0.6: Git projection ---------------- */
+
+/**
+ * Read-only view of one git commit. Computed on demand from
+ * `git log` — never persisted. Sourced from the local repo that
+ * owns `session.project` (walked up to find `.git/`).
+ */
+export interface GitCommitInfo {
+  hash: string;
+  shortHash: string;
+  message: string;
+  body: string;
+  author: string;
+  authorEmail: string;
+  timestamp: string;
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface GitRepoInfo {
+  root: string;
+  branch?: string;
+  currentCommit?: string;
+}
+
+/** Returned by `GET /api/git/sessions/:id`. */
+export interface GitSessionInfo {
+  /** `null` if the session's project is not inside a git repository. */
+  repo: GitRepoInfo | null;
+  branch?: string;
+  commits: GitCommitInfo[];
+  /** Human-readable reason when `repo` is `null`. */
+  reason?: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;
