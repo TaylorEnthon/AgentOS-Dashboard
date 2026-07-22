@@ -76,7 +76,12 @@ test('findRepoRoot: returns null for non-repo path', async () => {
 });
 
 test('findRepoRoot: returns null for non-existent path', async () => {
-  const found = await findRepoRoot('Z:\\definitely-does-not-exist-12345');
+  // Build a path that is guaranteed to NOT exist on any platform: a
+  // random subdirectory of the OS temp dir. Using 'Z:\...' (which
+  // worked on Windows) silently resolves to a relative path on Linux
+  // and may end up pointing at a real directory.
+  const phantom = path.join(os.tmpdir(), `agentos-no-such-${Date.now()}-${Math.random()}/sub/deep`);
+  const found = await findRepoRoot(phantom);
   assert.equal(found, null);
 });
 
