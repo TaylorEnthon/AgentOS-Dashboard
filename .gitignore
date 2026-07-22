@@ -29,3 +29,6 @@ pnpm-debug.log*
 
 # CodeGraph (local-only index, never commit)
 .codegraph/
+
+# v0.7+ completion reports — work artifacts, ephemeral, never commit
+docs/
