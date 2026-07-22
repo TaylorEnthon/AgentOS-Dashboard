@@ -26,3 +26,6 @@ pnpm-debug.log*
 .env
 .env.local
 .env.*.local
+
+# CodeGraph (local-only index, never commit)
+.codegraph/
