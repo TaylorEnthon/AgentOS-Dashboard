@@ -118,6 +118,70 @@ npm test
 - **实时文件监听**：用 `chokidar` 替换轮询
 - **自定义 Agent**：通过 UI 填任意 JSONL 路径 + 自定义解析脚本
 
+## Development
+
+开发者只需要记住四个命令：
+
+```bash
+npm install            # 装依赖（~30s）
+npm test               # 跑全部 workspace 的测试
+npm run typecheck      # 全部 workspace 的 TypeScript 检查
+npm run build          # 全部 workspace 的产物构建
+```
+
+启动开发服务器：
+
+```bash
+npm run dev            # 后端 dev (http://127.0.0.1:3000，热重载)
+npm run dev -w @agentos/frontend   # 前端 vite dev (http://127.0.0.1:5173，代理 /api)
+```
+
+生产模式启动：
+
+```bash
+npm run build && npm run start     # 后端用 dist 启动，前端由后端托管
+```
+
+`package.json` 的根 `scripts` 已经把 test / build / typecheck 全部用 `-ws --if-present` 聚合到 workspace，**无需在子包单独跑**。
+
+## CI
+
+每次 push 到 `main` 或对 `main` 提 PR，`.github/workflows/ci.yml` 会自动跑：
+
+```
+install (npm ci)
+   ↓
+typecheck (npm run typecheck)
+   ↓
+test    (npm test)
+   ↓
+build   (npm run build)
+   ↓
+audit   (npm audit --omit=dev --audit-level=high,  非阻塞)
+```
+
+- **触发**：push 到 main / PR 到 main
+- **Node**：22（项目 `engines.node >= 20`，CI 跑最新 LTS）
+- **缓存**：`actions/setup-node` 内置 npm 缓存，**不缓存 `node_modules` 与 `dist/`**（避免陈旧产物）
+- **`concurrency`**：同一分支的新 push 会取消尚未完成的旧 run，避免浪费 CI 分钟
+- **超时**：15 分钟
+- **失败处理**：核心步骤任一失败即视为 CI 失败；`npm audit` 故意 `continue-on-error: true`，只暴露问题不阻塞合并
+
+如果 CI 红了，先在本地复现：
+
+```bash
+npm ci && npm run typecheck && npm test && npm run build
+```
+
+## 贡献流程
+
+1. `git checkout -b feat/<short-name>`
+2. 改代码 + 补测试
+3. `npm test && npm run typecheck && npm run build` 全绿
+4. `git commit`（一个阶段一个 commit，不要 amend / squash / force push）
+5. `git push` 普通 fast-forward
+6. 开 PR → 等 CI 通过 → 合并
+
 ## 许可
 
 MIT

@@ -1,0 +1,67 @@
+# AgentOS Dashboard — CI
+#
+# Runs on every push to main and every pull request targeting main.
+# Validates the full monorepo: install → typecheck → test → build.
+#
+# Design notes:
+# - We use `setup-node` with the npm cache (not a custom cache action) to
+#   speed up installs without caching node_modules or build outputs.
+# - Node 22 matches the version used during development; the project's
+#   `engines.node` field requires >=20, so this stays within range.
+# - jobs.fail-fast is off so we see every check's status even if one fails.
+# - `npm audit` is intentionally `continue-on-error: true`: it surfaces
+#   dependency issues without blocking merges on transitive vulns that we
+#   can't fix in this repo.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch on new pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: install + typecheck + test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Show tool versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Typecheck (all workspaces)
+        run: npm run typecheck
+
+      - name: Test (all workspaces)
+        run: npm test
+
+      - name: Build (all workspaces)
+        run: npm run build
+
+      - name: Audit dependencies (non-blocking)
+        # Surface known vulnerabilities without failing the build.
+        # Review the report and bump transitive deps as needed.
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
