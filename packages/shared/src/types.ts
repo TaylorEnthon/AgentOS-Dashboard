@@ -339,6 +339,22 @@ export interface ResumeCommand {
 export type ExecutionStatus = 'running' | 'completed' | 'unknown';
 
 /**
+ * User-overridable status (v0.9). Decoupled from the auto-derived
+ * ExecutionStatus so the user can express intent ("done", "blocked")
+ * that the auto-rules can't infer. The frontend renders
+ * `effectiveStatus = manualStatus ?? status`.
+ */
+export type ManualExecutionStatus =
+  | 'todo'
+  | 'in-progress'
+  | 'done'
+  | 'blocked'
+  | 'archived';
+
+/** What the UI actually shows: manual override wins, otherwise derived. */
+export type EffectiveExecutionStatus = ExecutionStatus | ManualExecutionStatus;
+
+/**
  * A derived "execution" — one logical task within a Session.
  *
  * An Execution is NOT stored anywhere. It is a pure projection over
@@ -361,8 +377,19 @@ export interface AgentExecution {
   project: string;
   /** Display path (may differ from `project` if the agent URL-encodes it). */
   projectDisplay: string;
-  /** Best-effort title: session.displayName → session.title → inferred. */
+  /** Best-effort title (auto-derived from events / session). */
   title?: string | null;
+  /** User-set display name (from execution_metadata); null when unset. */
+  displayName?: string | null;
+  /** Tags from execution_metadata; empty array when unset. */
+  tags: string[];
+  /** User-set manual status override; null when unset. */
+  manualStatus?: ManualExecutionStatus | null;
+  /**
+   * What the UI should render. Computed as `manualStatus ?? status`
+   * server-side. Manual wins because it expresses user intent.
+   */
+  effectiveStatus: EffectiveExecutionStatus;
   /** Inclusive start (earliest event in the group). */
   startTime: string;
   /** Exclusive end (latest event's timestamp + grace, or now if still running). */
@@ -373,6 +400,7 @@ export interface AgentExecution {
   cost: number;
   /** Git commits whose timestamp falls in [startTime, endTime]. */
   commits: GitCommitInfo[];
+  /** Auto-derived status (from activity + commits). */
   status: ExecutionStatus;
 }
 
@@ -385,6 +413,37 @@ export interface ExecutionDetail extends AgentExecution {
   events: TimelineItem[];
   /** Usage records that fell in the execution window. */
   usage: UsageRecord[];
+}
+
+/* ---------------- v0.9: Execution Workspace ---------------- */
+
+/**
+ * Per-execution user customizations. Mirrors SessionMetadata's shape
+ * (but no `pinned` — executions are already grouped into the Session's
+ * pinned-first sort) and adds `manualStatus` for explicit status
+ * overrides.
+ *
+ * Stored in the `execution_metadata` table; never mixed with
+ * `execution` derivation tables.
+ */
+export interface ExecutionMetadata {
+  executionId: string;
+  displayName?: string | null;
+  note?: string | null;
+  /** JSON array of strings; stored as text in SQLite. */
+  tags: string[];
+  manualStatus?: ManualExecutionStatus | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Partial update body for `PATCH /api/executions/:id/metadata`. */
+export interface ExecutionMetadataPatch {
+  displayName?: string | null;
+  note?: string | null;
+  tags?: string[];
+  /** `null` clears the override. `'archived'` and others set it. */
+  manualStatus?: ManualExecutionStatus | null;
 }
 
 /** Pick the worse of two confidence levels. */

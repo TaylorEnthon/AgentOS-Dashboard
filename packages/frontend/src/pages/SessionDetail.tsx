@@ -306,10 +306,11 @@ function ExecutionsSection({ sessionId }: { sessionId: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Executions</CardTitle>
+        <CardTitle>Execution Workspace</CardTitle>
         <CardDescription>
           Derived from this session's activity using a 30-minute gap rule.
-          Each execution groups the work for one logical task.
+          Each execution groups the work for one logical task. Click any
+          row to open the Workspace editor (displayName / tags / note / status).
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -321,31 +322,43 @@ function ExecutionsSection({ sessionId }: { sessionId: string }) {
         )}
         {items.length > 0 && (
           <ul className="space-y-1.5">
-            {items.map((exec) => (
-              <li key={exec.id}>
-                <Link
-                  to={`/executions/${encodeURIComponent(exec.id)}`}
-                  className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium" title={exec.title ?? exec.id}>
-                        {exec.title ?? `Execution #${exec.id.split(':exec-')[1]}`}
-                      </span>
-                      <StatusBadge status={exec.status} />
+            {items.map((exec) => {
+              const dn = (exec.displayName ?? '').trim();
+              const title = dn || exec.title || `Execution #${exec.id.split(':exec-')[1]}`;
+              return (
+                <li key={exec.id}>
+                  <Link
+                    to={`/executions/${encodeURIComponent(exec.id)}`}
+                    className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium" title={title}>{title}</span>
+                        <StatusBadge status={exec.effectiveStatus} />
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                        {formatRelative(exec.startTime)}{exec.endTime ? ` → ${formatRelative(exec.endTime)}` : ''}
+                      </div>
+                      {exec.tags.length > 0 && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1">
+                          {exec.tags.slice(0, 6).map((t) => (
+                            <Badge key={t} tone="muted" className="text-[10px]">#{t}</Badge>
+                          ))}
+                          {exec.tags.length > 6 && (
+                            <span className="text-[10px] text-muted-foreground">+{exec.tags.length - 6}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">
-                      {formatRelative(exec.startTime)}{exec.endTime ? ` → ${formatRelative(exec.endTime)}` : ''}
+                    <div className="flex shrink-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
+                      <span>{exec.eventCount} events</span>
+                      <span>{formatCompact(exec.tokenUsage)} tokens</span>
+                      {exec.commits.length > 0 && <span>{exec.commits.length} commits</span>}
                     </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
-                    <span>{exec.eventCount} events</span>
-                    <span>{formatCompact(exec.tokenUsage)} tokens</span>
-                    {exec.commits.length > 0 && <span>{exec.commits.length} commits</span>}
-                  </div>
-                </Link>
-              </li>
-            ))}
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         )}
       </CardContent>
@@ -353,11 +366,16 @@ function ExecutionsSection({ sessionId }: { sessionId: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: 'running' | 'completed' | 'unknown' }) {
+function StatusBadge({ status }: { status: import('../lib/api').EffectiveExecutionStatus }) {
   switch (status) {
-    case 'running':   return <Badge tone="info" className="text-[10px]">● running</Badge>;
-    case 'completed': return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
-    case 'unknown':   return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
+    case 'running':     return <Badge tone="info" className="text-[10px]">● running</Badge>;
+    case 'completed':   return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
+    case 'unknown':     return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
+    case 'todo':        return <Badge tone="muted" className="text-[10px]">○ todo</Badge>;
+    case 'in-progress': return <Badge tone="info" className="text-[10px]">▸ in-progress</Badge>;
+    case 'done':        return <Badge tone="success" className="text-[10px]">✓ done</Badge>;
+    case 'blocked':     return <Badge tone="danger" className="text-[10px]">✕ blocked</Badge>;
+    case 'archived':    return <Badge tone="muted" className="text-[10px]">▣ archived</Badge>;
   }
 }
 

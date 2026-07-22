@@ -5,6 +5,8 @@ import type {
   AgentSession,
   AgentType,
   ActivityEvent,
+  ExecutionMetadata,
+  ManualExecutionStatus,
   Project,
   UsageRecord,
   DataHealth,
@@ -89,6 +91,16 @@ export interface SessionMetadataRow {
   note: string | null;
   tags: string | null;
   pinned: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExecutionMetadataRow {
+  execution_id: string;
+  display_name: string | null;
+  note: string | null;
+  tags: string | null;
+  manual_status: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -203,6 +215,23 @@ CREATE TABLE IF NOT EXISTS session_metadata (
   note         TEXT,
   tags         TEXT,    -- JSON array of strings
   pinned       INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+/*
+ * v0.9: Per-execution user customizations. execution_id is the same
+ * string the API exposes — typically sessionId + ":exec-" + index.
+ * Auto-derived (sessions / activity_events / usage_records / git)
+ * stays read-only; all user data lives here so re-scanning collectors
+ * cannot clobber it. Same idempotent IF NOT EXISTS pattern.
+ */
+CREATE TABLE IF NOT EXISTS execution_metadata (
+  execution_id TEXT PRIMARY KEY,
+  display_name TEXT,
+  note         TEXT,
+  tags         TEXT,    -- JSON array of strings
+  manual_status TEXT,   -- ManualExecutionStatus or null
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
@@ -526,6 +555,79 @@ export class Db {
   /** Delete user metadata for one session (no-op if absent). */
   deleteSessionMetadata(sessionId: string): void {
     this.raw.prepare(`DELETE FROM session_metadata WHERE session_id = ?`).run(sessionId);
+  }
+
+  // ---------------- v0.9: Execution Metadata ----------------
+
+  /** Read a single execution's metadata, or null if not set. */
+  getExecutionMetadata(executionId: string): ExecutionMetadata | null {
+    const row = this.raw.prepare(
+      `SELECT * FROM execution_metadata WHERE execution_id = ?`,
+    ).get(executionId) as ExecutionMetadataRow | undefined;
+    if (!row) return null;
+    return rowToExecutionMetadata(row);
+  }
+
+  /**
+   * Bulk-read execution metadata for many executions in one
+   * round-trip. Returns a map keyed by executionId.
+   */
+  getExecutionMetadataBulk(executionIds: string[]): Map<string, ExecutionMetadata> {
+    const out = new Map<string, ExecutionMetadata>();
+    if (executionIds.length === 0) return out;
+    const placeholders = executionIds.map(() => '?').join(',');
+    const rows = this.raw.prepare(
+      `SELECT * FROM execution_metadata WHERE execution_id IN (${placeholders})`,
+    ).all(...executionIds) as ExecutionMetadataRow[];
+    for (const r of rows) out.set(r.execution_id, rowToExecutionMetadata(r));
+    return out;
+  }
+
+  /** Upsert (insert-or-replace) execution metadata. */
+  upsertExecutionMetadata(
+    executionId: string,
+    patch: {
+      displayName?: string | null;
+      note?: string | null;
+      tags?: string[];
+      manualStatus?: ManualExecutionStatus | null;
+    },
+  ): ExecutionMetadata {
+    const existing = this.getExecutionMetadata(executionId);
+    const now = new Date().toISOString();
+    const next: ExecutionMetadata = {
+      executionId,
+      displayName:  patch.displayName  !== undefined ? patch.displayName  : (existing?.displayName  ?? null),
+      note:         patch.note         !== undefined ? patch.note         : (existing?.note         ?? null),
+      tags:         patch.tags         !== undefined ? patch.tags         : (existing?.tags         ?? []),
+      manualStatus: patch.manualStatus !== undefined ? patch.manualStatus : (existing?.manualStatus ?? null),
+      createdAt:    existing?.createdAt ?? now,
+      updatedAt:    now,
+    };
+    this.raw.prepare(
+      `INSERT INTO execution_metadata (execution_id, display_name, note, tags, manual_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(execution_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         note         = excluded.note,
+         tags         = excluded.tags,
+         manual_status = excluded.manual_status,
+         updated_at   = excluded.updated_at`,
+    ).run(
+      next.executionId,
+      next.displayName,
+      next.note,
+      JSON.stringify(next.tags),
+      next.manualStatus,
+      next.createdAt,
+      next.updatedAt,
+    );
+    return next;
+  }
+
+  /** Delete user metadata for one execution (no-op if absent). */
+  deleteExecutionMetadata(executionId: string): void {
+    this.raw.prepare(`DELETE FROM execution_metadata WHERE execution_id = ?`).run(executionId);
   }
 
   /**
@@ -879,6 +981,39 @@ export function rowToMetadata(row: SessionMetadataRow): SessionMetadata {
     note: row.note,
     tags,
     pinned: row.pinned !== 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * v0.9: Map a raw execution_metadata row to the shared shape.
+ * Defensive against corrupted JSON / unknown manual_status values —
+ * the latter is clamped to `null` so the API never returns garbage.
+ */
+export function rowToExecutionMetadata(row: ExecutionMetadataRow): ExecutionMetadata {
+  let tags: string[] = [];
+  if (row.tags) {
+    try {
+      const parsed = JSON.parse(row.tags);
+      if (Array.isArray(parsed)) tags = parsed.filter((t): t is string => typeof t === 'string');
+    } catch {
+      tags = [];
+    }
+  }
+  const validStatuses = new Set<ManualExecutionStatus>([
+    'todo', 'in-progress', 'done', 'blocked', 'archived',
+  ]);
+  const manualStatus: ManualExecutionStatus | null =
+    row.manual_status && validStatuses.has(row.manual_status as ManualExecutionStatus)
+      ? (row.manual_status as ManualExecutionStatus)
+      : null;
+  return {
+    executionId: row.execution_id,
+    displayName: row.display_name,
+    note: row.note,
+    tags,
+    manualStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

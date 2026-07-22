@@ -261,6 +261,10 @@ export interface SessionResumeDto {
 
 export type ExecutionStatus = 'running' | 'completed' | 'unknown';
 
+export type ManualExecutionStatus = 'todo' | 'in-progress' | 'done' | 'blocked' | 'archived';
+
+export type EffectiveExecutionStatus = ExecutionStatus | ManualExecutionStatus;
+
 export interface AgentExecutionDto {
   id: string;
   sessionId: string;
@@ -269,6 +273,16 @@ export interface AgentExecutionDto {
   project: string;
   projectDisplay: string;
   title?: string | null;
+  /** v0.9: user-set display name (from execution_metadata). null when unset. */
+  displayName?: string | null;
+  /** v0.9: note (from execution_metadata). null when unset. */
+  note?: string | null;
+  /** v0.9: tags from execution_metadata. */
+  tags: string[];
+  /** v0.9: user manual status override. null when unset. */
+  manualStatus?: ManualExecutionStatus | null;
+  /** v0.9: what the UI should render — manualStatus ?? status. */
+  effectiveStatus: EffectiveExecutionStatus;
   startTime: string;
   endTime?: string | null;
   durationMs: number;
@@ -298,6 +312,25 @@ export interface ExecutionDetailDto extends AgentExecutionDto {
     unknownModel: boolean;
     source?: SourceMetaDto;
   }>;
+}
+
+/** v0.9: per-execution user customizations. */
+export interface ExecutionMetadataDto {
+  executionId: string;
+  displayName?: string | null;
+  note?: string | null;
+  tags: string[];
+  manualStatus?: ManualExecutionStatus | null;
+  createdAt?: string;
+  updatedAt: string;
+}
+
+/** v0.9: patch body for `PATCH /api/executions/:id/metadata`. */
+export interface ExecutionMetadataPatch {
+  displayName?: string | null;
+  note?: string | null;
+  tags?: string[];
+  manualStatus?: ManualExecutionStatus | null;
 }
 
 export interface SessionMetadataPatch {
@@ -383,7 +416,14 @@ export const api = {
     http<SessionResumeDto>(`/api/sessions-v2/${encodeURIComponent(id)}/resume`),
 
   // v0.8: Execution Intelligence
-  executions: (params: { agent?: string; session?: string; project?: string; limit?: number } = {}) => {
+  executions: (params: {
+    agent?: string;
+    session?: string;
+    project?: string;
+    tag?: string;
+    status?: string;
+    limit?: number;
+  } = {}) => {
     const q = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
       if (v === undefined || v === '') return;
@@ -396,4 +436,15 @@ export const api = {
     http<ExecutionDetailDto>(`/api/executions/${encodeURIComponent(id)}`),
   sessionExecutions: (sessionId: string) =>
     http<AgentExecutionDto[]>(`/api/sessions-v2/${encodeURIComponent(sessionId)}/executions`),
+
+  // v0.9: Execution Workspace
+  executionMetadata: (id: string) =>
+    http<{ metadata: ExecutionMetadataDto | null; effectiveStatus: EffectiveExecutionStatus | null }>(
+      `/api/executions/${encodeURIComponent(id)}/metadata`,
+    ),
+  patchExecutionMetadata: (id: string, patch: ExecutionMetadataPatch) =>
+    http<ExecutionMetadataDto>(`/api/executions/${encodeURIComponent(id)}/metadata`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
 };

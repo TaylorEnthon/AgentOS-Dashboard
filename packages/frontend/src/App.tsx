@@ -31,7 +31,7 @@ export function App() {
           <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-primary-foreground font-bold">A</div>
           <div>
             <div className="font-semibold leading-tight">AgentOS</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.8</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.9</div>
           </div>
         </div>
         <nav className="flex flex-col gap-1">

@@ -392,6 +392,8 @@ function TimelineRow({ item, execIndex }: {
           {(() => {
             const exec = findExecutionForEvent(item, execIndex);
             if (!exec) return null;
+            const dn = (exec.displayName ?? '').trim();
+            const label = dn || exec.title || exec.id.split(':exec-')[1];
             return (
               <>
                 <span>·</span>
@@ -401,7 +403,7 @@ function TimelineRow({ item, execIndex }: {
                   onClick={(e) => e.stopPropagation()}
                   title={exec.title ?? exec.id}
                 >
-                  execution: {exec.title ?? exec.id.split(':exec-')[1]} →
+                  execution: {label} →
                 </Link>
               </>
             );

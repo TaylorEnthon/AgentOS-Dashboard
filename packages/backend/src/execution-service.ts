@@ -230,6 +230,11 @@ export function deriveExecutionStatus(
 /**
  * Build the public AgentExecution shape from a group + session context.
  * No DB access; pure function over already-fetched data.
+ *
+ * v0.9: User-set fields (displayName, tags, manualStatus) are
+ * intentionally defaulted here. The route handler applies the
+ * execution_metadata row on top via `applyExecutionMetadata` so this
+ * function stays free of DB concerns.
  */
 export function buildExecution(
   sessionId: string,
@@ -248,6 +253,7 @@ export function buildExecution(
     ? Math.max(0, endMs - startMs)
     : 0;
   const { tokens, cost } = sumUsage(usageRecords);
+  const derived = deriveExecutionStatus(group, commits.length > 0, nowMs);
   return {
     id: `${sessionId}:exec-${group.index}`,
     sessionId,
@@ -256,6 +262,10 @@ export function buildExecution(
     project,
     projectDisplay,
     title: inferExecutionTitle(group.events),
+    displayName: null,
+    tags: [],
+    manualStatus: null,
+    effectiveStatus: derived,
     startTime: group.startTime,
     endTime: group.endTime,
     durationMs,
@@ -263,6 +273,41 @@ export function buildExecution(
     tokenUsage: tokens,
     cost,
     commits,
-    status: deriveExecutionStatus(group, commits.length > 0, nowMs),
+    status: derived,
   };
+}
+
+/**
+ * v0.9: Apply an execution_metadata row on top of an AgentExecution
+ * produced by buildExecution(). Mutates a copy and returns it.
+ *
+ * Rules:
+ *  - displayName / tags / manualStatus come straight from the metadata
+ *    (null / empty when unset)
+ *  - effectiveStatus = manualStatus ?? status
+ *  - title (the auto-inferred one) is preserved so the UI can fall
+ *    back to it when displayName is empty
+ */
+export function applyExecutionMetadata(
+  exec: AgentExecution,
+  meta: ExecutionMetadataLike | null,
+): AgentExecution {
+  if (!meta) return exec;
+  const effective: AgentExecution['effectiveStatus'] =
+    meta.manualStatus ?? exec.status;
+  return {
+    ...exec,
+    displayName: meta.displayName ?? null,
+    tags: meta.tags ?? [],
+    manualStatus: meta.manualStatus ?? null,
+    effectiveStatus: effective,
+  };
+}
+
+/** Subset of ExecutionMetadata we need in applyExecutionMetadata. */
+export interface ExecutionMetadataLike {
+  displayName?: string | null;
+  note?: string | null;
+  tags?: string[];
+  manualStatus?: import('@agentos/shared').ManualExecutionStatus | null;
 }

@@ -11,6 +11,7 @@ import { buildResumeCommand } from './resume.js';
 import {
   associateCommitsToExecutions,
   associateUsageToExecutions,
+  applyExecutionMetadata,
   buildExecution,
   groupEventsIntoExecutions,
 } from './execution-service.js';
@@ -290,10 +291,14 @@ export function registerRoutes(
       agent?: string;
       session?: string;
       project?: string;
+      /** v0.9: filter by a single tag (case-insensitive substring on the JSON-tag column). */
+      tag?: string;
+      /** v0.9: filter by effective status (manual OR derived). */
+      status?: string;
       limit?: string;
     };
   }>('/api/executions', async (req) => {
-    const { agent, session, project, limit } = req.query;
+    const { agent, session, project, tag, status, limit } = req.query;
     const lim = Math.max(1, Math.min(limit ? Number(limit) : 200, 1000));
 
     // Fetch candidate sessions matching the filters.
@@ -303,16 +308,24 @@ export function registerRoutes(
       limit: 1000,
     }).filter((s) => !session || s.id === session);
 
+    // v0.9: bulk-fetch all execution_metadata rows in one query so we
+    // can apply displayName/tags/manualStatus without N+1 calls.
+    const execIds: string[] = [];
+    for (const s of sessions) {
+      const events = db.listEventsForSession(s.id, 1000).map(rowToTimelineItem);
+      const groups = groupEventsIntoExecutions(events);
+      for (const g of groups) execIds.push(`${s.id}:exec-${g.index}`);
+    }
+    const metaMap = db.getExecutionMetadataBulk(execIds);
+
     const out: import('@agentos/shared').AgentExecution[] = [];
     for (const s of sessions) {
       const events = db.listEventsForSession(s.id, 1000).map(rowToTimelineItem);
-      // listEventsForSession returns ASC; groupEventsIntoExecutions needs ASC.
       const groups = groupEventsIntoExecutions(events);
       if (groups.length === 0) continue;
       const usage = db.listUsageForSession(s.id).map(rowToUsageDto);
       const usageByGroup = associateUsageToExecutions(groups, usage);
 
-      // Pull commits for the whole session's time window — read-only, optional.
       let commits: import('@agentos/shared').GitCommitInfo[] = [];
       if (s.project_display || s.project) {
         try {
@@ -332,9 +345,8 @@ export function registerRoutes(
       }
       const commitsByGroup = associateCommitsToExecutions(groups, commits);
 
-      const meta = db.getSessionMetadata(s.id);
       for (const g of groups) {
-        const exec = buildExecution(
+        const baseExec = buildExecution(
           s.id,
           s.agent_id,
           s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
@@ -344,16 +356,30 @@ export function registerRoutes(
           commitsByGroup.get(g.index) ?? [],
           usageByGroup.get(g.index) ?? [],
         );
-        // Inject metadata-based title override (displayName wins).
-        if (meta?.displayName) exec.title = meta.displayName;
+        // v0.9: apply execution_metadata on top
+        const meta = metaMap.get(baseExec.id) ?? null;
+        const exec = applyExecutionMetadata(baseExec, meta);
         out.push(exec);
       }
     }
 
+    // v0.9: optional filters (apply AFTER metadata is on, so they can
+    // target the effective status and the metadata tags).
+    let filtered = out;
+    if (tag && tag.trim()) {
+      const needle = tag.trim().toLowerCase();
+      filtered = filtered.filter((e) =>
+        e.tags.some((t) => t.toLowerCase().includes(needle)),
+      );
+    }
+    if (status && status.trim()) {
+      filtered = filtered.filter((e) => e.effectiveStatus === status);
+    }
+
     // Newest execution first; pinned session's executions naturally stay
     // near each other because the grouping happens inside each session.
-    out.sort((a, b) => b.startTime.localeCompare(a.startTime));
-    return out.slice(0, lim);
+    filtered.sort((a, b) => b.startTime.localeCompare(a.startTime));
+    return filtered.slice(0, lim);
   });
 
   // v0.8-b: execution detail — full events + usage + commits for one execution
@@ -398,7 +424,7 @@ export function registerRoutes(
     }
     const commitsByGroup = associateCommitsToExecutions(groups, commits);
 
-    const exec = buildExecution(
+    const baseExec = buildExecution(
       s.id,
       s.agent_id,
       s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
@@ -408,8 +434,9 @@ export function registerRoutes(
       commitsByGroup.get(group.index) ?? [],
       usageByGroup.get(group.index) ?? [],
     );
-    const meta = db.getSessionMetadata(s.id);
-    if (meta?.displayName) exec.title = meta.displayName;
+    // v0.9: apply execution_metadata on top
+    const meta = db.getExecutionMetadata(req.params.id);
+    const exec = applyExecutionMetadata(baseExec, meta);
 
     return {
       ...exec,
@@ -449,9 +476,12 @@ export function registerRoutes(
     }
     const commitsByGroup = associateCommitsToExecutions(groups, commits);
 
-    const meta = db.getSessionMetadata(s.id);
+    // v0.9: bulk-fetch metadata for these executions
+    const execIds = groups.map((g) => `${s.id}:exec-${g.index}`);
+    const metaMap = db.getExecutionMetadataBulk(execIds);
+
     return groups.map((g) => {
-      const exec = buildExecution(
+      const baseExec = buildExecution(
         s.id,
         s.agent_id,
         s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
@@ -461,9 +491,78 @@ export function registerRoutes(
         commitsByGroup.get(g.index) ?? [],
         usageByGroup.get(g.index) ?? [],
       );
-      if (meta?.displayName) exec.title = meta.displayName;
-      return exec;
+      return applyExecutionMetadata(baseExec, metaMap.get(baseExec.id) ?? null);
     });
+  });
+
+  /* ---------------- v0.9: Execution Workspace ---------------- */
+
+  // v0.9-a: read a single execution's metadata + effective status
+  app.get<{ Params: { id: string } }>('/api/executions/:id/metadata', async (req, reply) => {
+    // id format: `${sessionId}:exec-${index}` — same parser as detail
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    if (!db.getSession(sessionId)) {
+      return reply.code(404).send({ error: 'session not found' });
+    }
+    const meta = db.getExecutionMetadata(req.params.id);
+    return {
+      metadata: meta,
+      effectiveStatus: meta?.manualStatus ?? null, // null when no manual override
+    };
+  });
+
+  // v0.9-b: patch metadata (displayName / note / tags / manualStatus)
+  app.patch<{ Params: { id: string }; Body: Partial<{
+    displayName?: string | null;
+    note?: string | null;
+    tags?: string[];
+    manualStatus?: string | null;
+  }> }>('/api/executions/:id/metadata', async (req, reply) => {
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    if (!db.getSession(sessionId)) {
+      return reply.code(404).send({ error: 'session not found' });
+    }
+
+    const b = req.body ?? {};
+    // Validate manualStatus if provided (allow null = clear)
+    const VALID_STATUS = new Set(['todo', 'in-progress', 'done', 'blocked', 'archived']);
+    let manualStatus: import('@agentos/shared').ManualExecutionStatus | null | undefined;
+    if (b.manualStatus === null) {
+      manualStatus = null;
+    } else if (b.manualStatus === undefined) {
+      manualStatus = undefined;
+    } else if (typeof b.manualStatus === 'string' && VALID_STATUS.has(b.manualStatus)) {
+      manualStatus = b.manualStatus as import('@agentos/shared').ManualExecutionStatus;
+    } else {
+      return reply.code(400).send({ error: 'invalid manualStatus', allowed: [...VALID_STATUS] });
+    }
+
+    // Sanitize tags (same rules as session_metadata)
+    let tags: string[] | undefined;
+    if (Array.isArray(b.tags)) {
+      const seen = new Set<string>();
+      tags = [];
+      for (const t of b.tags) {
+        if (typeof t !== 'string') continue;
+        const trimmed = t.trim();
+        if (!trimmed || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        tags.push(trimmed);
+        if (tags.length >= 32) break;
+      }
+    }
+
+    const updated = db.upsertExecutionMetadata(req.params.id, {
+      displayName:  b.displayName === undefined ? undefined : (b.displayName || null),
+      note:         b.note        === undefined ? undefined : (b.note        || null),
+      tags,
+      manualStatus,
+    });
+    return updated;
   });
 
   /* ---------------- v0.6 Git integration ---------------- */

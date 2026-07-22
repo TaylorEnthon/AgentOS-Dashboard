@@ -10,7 +10,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { api, type AgentExecutionDto, type AgentStatusDto, type ExecutionStatus } from '../lib/api';
+import {
+  api,
+  type AgentExecutionDto,
+  type AgentStatusDto,
+  type EffectiveExecutionStatus,
+} from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -26,6 +31,17 @@ export function ExecutionsPage() {
   const agent = searchParams.get('agent') ?? '';
   const session = searchParams.get('session') ?? '';
   const project = searchParams.get('project') ?? '';
+  const tag = searchParams.get('tag') ?? '';
+  const status = searchParams.get('status') ?? '';
+
+  const setParam = (key: string, value: string) => {
+    setSearchParams((p) => {
+      const n = new URLSearchParams(p);
+      if (value) n.set(key, value);
+      else n.delete(key);
+      return n;
+    }, { replace: true });
+  };
 
   const load = useCallback(
     (silent = false) => {
@@ -34,6 +50,8 @@ export function ExecutionsPage() {
       if (agent) params.agent = agent;
       if (session) params.session = session;
       if (project) params.project = project;
+      if (tag) params.tag = tag;
+      if (status) params.status = status;
       Promise.all([api.executions(params), api.agentStatus()])
         .then(([rows, ag]) => {
           setItems(rows);
@@ -43,7 +61,7 @@ export function ExecutionsPage() {
         .catch((e) => setErr(String(e)))
         .finally(() => { if (!silent) setRefreshing(false); });
     },
-    [agent, session, project],
+    [agent, session, project, tag, status],
   );
 
   useEffect(() => { load(); }, [load]);
@@ -85,7 +103,8 @@ export function ExecutionsPage() {
           <CardTitle>Filter</CardTitle>
           <CardDescription>
             Executions are derived from sessions using a 30-min gap rule.
-            Pinned sessions surface first; sessions of the same agent group together.
+            User customizations (displayName, tags, manualStatus) live in{' '}
+            <code className="font-mono">execution_metadata</code>.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -93,12 +112,7 @@ export function ExecutionsPage() {
             <Field label="Agent">
               <select
                 value={agent}
-                onChange={(e) => setSearchParams((p) => {
-                  const n = new URLSearchParams(p);
-                  if (e.target.value) n.set('agent', e.target.value);
-                  else n.delete('agent');
-                  return n;
-                }, { replace: true })}
+                onChange={(e) => setParam('agent', e.target.value)}
                 className="h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <option value="">All</option>
@@ -113,12 +127,7 @@ export function ExecutionsPage() {
                 type="text"
                 value={session}
                 placeholder="claude-code:abc-123"
-                onChange={(e) => setSearchParams((p) => {
-                  const n = new URLSearchParams(p);
-                  if (e.target.value) n.set('session', e.target.value);
-                  else n.delete('session');
-                  return n;
-                }, { replace: true })}
+                onChange={(e) => setParam('session', e.target.value)}
                 className="h-9 w-64 rounded-md border border-input bg-background px-2 text-sm font-mono outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </Field>
@@ -128,14 +137,41 @@ export function ExecutionsPage() {
                 type="text"
                 value={project}
                 placeholder="/p/agentos"
-                onChange={(e) => setSearchParams((p) => {
-                  const n = new URLSearchParams(p);
-                  if (e.target.value) n.set('project', e.target.value);
-                  else n.delete('project');
-                  return n;
-                }, { replace: true })}
+                onChange={(e) => setParam('project', e.target.value)}
                 className="h-9 w-64 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
+            </Field>
+
+            <Field label="Tag">
+              <input
+                type="text"
+                value={tag}
+                placeholder="v0.9"
+                onChange={(e) => setParam('tag', e.target.value)}
+                className="h-9 w-32 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </Field>
+
+            <Field label="Status">
+              <select
+                value={status}
+                onChange={(e) => setParam('status', e.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <option value="">Any</option>
+                <optgroup label="Auto">
+                  <option value="running">running</option>
+                  <option value="completed">completed</option>
+                  <option value="unknown">unknown</option>
+                </optgroup>
+                <optgroup label="Manual">
+                  <option value="todo">todo</option>
+                  <option value="in-progress">in-progress</option>
+                  <option value="done">done</option>
+                  <option value="blocked">blocked</option>
+                  <option value="archived">archived</option>
+                </optgroup>
+              </select>
             </Field>
 
             <Button variant="ghost" size="sm" onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}>
@@ -172,24 +208,41 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function ExecutionRow({ exec }: { exec: AgentExecutionDto }) {
-  const title = exec.title ?? inferFallback(exec);
+  // v0.9: user-set displayName wins over the auto-derived title.
+  const displayName = (exec.displayName ?? '').trim();
+  const title = displayName || exec.title || inferFallback(exec);
   return (
     <li>
       <Link
         to={`/executions/${encodeURIComponent(exec.id)}`}
-        className="block rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/30"
+        className={cn(
+          'block rounded-lg border bg-card p-4 transition-colors',
+          exec.manualStatus
+            ? 'border-primary/40 ring-1 ring-primary/20'
+            : 'border-border hover:border-foreground/30',
+        )}
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h3 className="truncate font-medium" title={title}>{title}</h3>
               <Badge className={cn('text-[10px]', agentColor(exec.agentType))}>{exec.agentType}</Badge>
-              <StatusBadge status={exec.status} />
+              <StatusBadge status={exec.effectiveStatus} />
             </div>
             <div className="mt-1 truncate font-mono text-xs text-muted-foreground" title={exec.projectDisplay || exec.project}>
               {exec.projectDisplay || exec.project} · session{' '}
               <span className="text-foreground/70">{exec.sessionId}</span>
             </div>
+            {exec.tags.length > 0 && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                {exec.tags.slice(0, 8).map((t) => (
+                  <Badge key={t} tone="muted" className="text-[10px]">#{t}</Badge>
+                ))}
+                {exec.tags.length > 8 && (
+                  <span className="text-[10px] text-muted-foreground">+{exec.tags.length - 8} more</span>
+                )}
+              </div>
+            )}
           </div>
           <time className="shrink-0 text-xs tabular-nums text-muted-foreground/80" dateTime={exec.startTime} title={exec.startTime}>
             {formatRelative(exec.startTime)}
@@ -229,14 +282,26 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatusBadge({ status }: { status: ExecutionStatus }) {
+function StatusBadge({ status }: { status: EffectiveExecutionStatus }) {
   switch (status) {
+    // Auto-derived (v0.8)
     case 'running':
       return <Badge tone="info" className="text-[10px]">● running</Badge>;
     case 'completed':
       return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
     case 'unknown':
       return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
+    // Manual (v0.9) — distinct visuals so users can tell them apart
+    case 'todo':
+      return <Badge tone="muted" className="text-[10px]">○ todo</Badge>;
+    case 'in-progress':
+      return <Badge tone="info" className="text-[10px]">▸ in-progress</Badge>;
+    case 'done':
+      return <Badge tone="success" className="text-[10px]">✓ done</Badge>;
+    case 'blocked':
+      return <Badge tone="danger" className="text-[10px]">✕ blocked</Badge>;
+    case 'archived':
+      return <Badge tone="muted" className="text-[10px]">▣ archived</Badge>;
   }
 }
 

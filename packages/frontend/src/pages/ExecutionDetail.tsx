@@ -5,14 +5,29 @@
  * Source: `GET /api/executions/:id` (where id = `${sessionId}:exec-${n}`)
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { api, type ExecutionDetailDto } from '../lib/api';
+import {
+  api,
+  type EffectiveExecutionStatus,
+  type ExecutionDetailDto,
+  type ExecutionMetadataDto,
+  type ManualExecutionStatus,
+} from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Table, TBody, TD, TH, THead, TR } from '../components/ui/table';
 import { agentColor, cn, formatCompact, formatDate, formatRelative, formatUSD } from '../lib/format';
+
+const MANUAL_STATUSES: Array<{ value: '' | ManualExecutionStatus; label: string }> = [
+  { value: '',                label: 'Auto (use derived status)' },
+  { value: 'todo',            label: 'Todo' },
+  { value: 'in-progress',     label: 'In Progress' },
+  { value: 'done',            label: 'Done' },
+  { value: 'blocked',         label: 'Blocked' },
+  { value: 'archived',        label: 'Archived' },
+];
 
 export function ExecutionDetailPage() {
   const { id = '' } = useParams();
@@ -28,14 +43,10 @@ export function ExecutionDetailPage() {
   if (err) return <div className="p-6 text-rose-600">Failed to load: {err}</div>;
   if (!data) return <div className="p-6 text-muted-foreground">Loading…</div>;
 
-  const title = data.title ?? `${data.agentType} execution`;
-  const statusBadge = (() => {
-    switch (data.status) {
-      case 'running':   return <Badge tone="info" className="text-[10px]">● running</Badge>;
-      case 'completed': return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
-      case 'unknown':   return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
-    }
-  })();
+  // v0.9: displayName wins when set; otherwise fall back to auto title.
+  const displayName = (data.displayName ?? '').trim();
+  const title = displayName || data.title || `${data.agentType} execution`;
+  const statusBadge = <StatusBadge status={data.effectiveStatus} />;
 
   return (
     <div className="space-y-6">
@@ -58,6 +69,18 @@ export function ExecutionDetailPage() {
           </p>
         </div>
       </header>
+
+      {/* v0.9: Execution Workspace — user customizations */}
+      <WorkspaceEditor
+        executionId={data.id}
+        initial={{
+          displayName: data.displayName ?? null,
+          note: data.note ?? null,
+          tags: data.tags ?? [],
+          manualStatus: data.manualStatus ?? null,
+        }}
+        derivedStatus={data.status}
+      />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat label="Duration" value={formatDuration(data.durationMs)} />
@@ -228,4 +251,183 @@ function formatDuration(ms: number): string {
   if (h < 24) return `${h}h ${m % 60}m`;
   const d = Math.floor(h / 24);
   return `${d}d ${h % 24}h`;
+}
+
+/* ---------------- v0.9: StatusBadge ---------------- */
+
+function StatusBadge({ status }: { status: EffectiveExecutionStatus }) {
+  switch (status) {
+    case 'running':
+      return <Badge tone="info" className="text-[10px]">● running</Badge>;
+    case 'completed':
+      return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
+    case 'unknown':
+      return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
+    case 'todo':
+      return <Badge tone="muted" className="text-[10px]">○ todo</Badge>;
+    case 'in-progress':
+      return <Badge tone="info" className="text-[10px]">▸ in-progress</Badge>;
+    case 'done':
+      return <Badge tone="success" className="text-[10px]">✓ done</Badge>;
+    case 'blocked':
+      return <Badge tone="danger" className="text-[10px]">✕ blocked</Badge>;
+    case 'archived':
+      return <Badge tone="muted" className="text-[10px]">▣ archived</Badge>;
+  }
+}
+
+/* ---------------- v0.9: Workspace editor ---------------- */
+
+interface WorkspaceFormState {
+  displayName: string;
+  note: string;
+  tagsRaw: string;
+  manualStatus: '' | ManualExecutionStatus;
+}
+
+function WorkspaceEditor({
+  executionId,
+  initial,
+  derivedStatus,
+}: {
+  executionId: string;
+  initial: { displayName: string | null; note: string | null; tags: string[]; manualStatus: ManualExecutionStatus | null };
+  derivedStatus: import('../lib/api').ExecutionStatus;
+}) {
+  const [form, setForm] = useState<WorkspaceFormState>({
+    displayName: initial.displayName ?? '',
+    note: initial.note ?? '',
+    tagsRaw: initial.tags.join(', '),
+    manualStatus: initial.manualStatus ?? '',
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed when initial changes (parent reloaded).
+  useEffect(() => {
+    setForm({
+      displayName: initial.displayName ?? '',
+      note: initial.note ?? '',
+      tagsRaw: initial.tags.join(', '),
+      manualStatus: initial.manualStatus ?? '',
+    });
+  }, [initial.displayName, initial.note, initial.tags.join('|'), initial.manualStatus]);
+
+  const dirty = useMemo(() => {
+    return (
+      form.displayName !== (initial.displayName ?? '') ||
+      form.note !== (initial.note ?? '') ||
+      form.tagsRaw !== initial.tags.join(', ') ||
+      form.manualStatus !== (initial.manualStatus ?? '')
+    );
+  }, [form, initial]);
+
+  const save = async () => {
+    setError(null);
+    setSaving(true);
+    try {
+      const patch: import('../lib/api').ExecutionMetadataPatch = {
+        displayName: form.displayName.trim() ? form.displayName.trim() : null,
+        note: form.note.trim() ? form.note.trim() : null,
+        tags: form.tagsRaw
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean),
+        // `''` means "Auto" — clears the manual override.
+        manualStatus: form.manualStatus === '' ? null : form.manualStatus,
+      };
+      const updated: ExecutionMetadataDto = await api.patchExecutionMetadata(executionId, patch);
+      setForm({
+        displayName: updated.displayName ?? '',
+        note: updated.note ?? '',
+        tagsRaw: (updated.tags ?? []).join(', '),
+        manualStatus: updated.manualStatus ?? '',
+      });
+      setSavedAt(new Date().toISOString());
+      setTimeout(() => setSavedAt(null), 2500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Execution Workspace</CardTitle>
+        <CardDescription>
+          Customizations live in the <code className="font-mono">execution_metadata</code> table.
+          We never modify the derived execution (events / commits / usage).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Display name</label>
+            <input
+              type="text"
+              value={form.displayName}
+              onChange={(e) => setForm((f) => ({ ...f, displayName: e.target.value }))}
+              placeholder="e.g. Implement Workspace v0.9"
+              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <p className="text-[10px] text-muted-foreground/70">
+              Wins over the auto-inferred title when set.
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Tags <span className="text-muted-foreground/70">(comma-separated, max 32)</span></label>
+            <input
+              type="text"
+              value={form.tagsRaw}
+              onChange={(e) => setForm((f) => ({ ...f, tagsRaw: e.target.value }))}
+              placeholder="v0.9, feature, important"
+              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+
+          <div className="space-y-1 md:col-span-2">
+            <label className="text-xs font-medium text-muted-foreground">Note</label>
+            <textarea
+              value={form.note}
+              onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+              placeholder="Goal, leftover issues, post-mortem…"
+              rows={3}
+              className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Status</label>
+            <select
+              value={form.manualStatus}
+              onChange={(e) => setForm((f) => ({ ...f, manualStatus: e.target.value as WorkspaceFormState['manualStatus'] }))}
+              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {MANUAL_STATUSES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </select>
+            <p className="text-[10px] text-muted-foreground/70">
+              Auto currently shows <strong>{derivedStatus}</strong>. Manual overrides win when set.
+            </p>
+          </div>
+        </div>
+
+        {error && <p className="text-xs text-rose-600">{error}</p>}
+
+        <div className="flex items-center justify-between">
+          <span className={cn('text-xs text-muted-foreground', savedAt && 'text-emerald-600')}>
+            {savedAt ? 'Saved' : dirty ? 'Unsaved changes' : 'No changes'}
+          </span>
+          <Button size="sm" onClick={save} disabled={saving || !dirty}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
