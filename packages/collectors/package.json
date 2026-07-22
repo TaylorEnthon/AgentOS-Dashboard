@@ -12,7 +12,6 @@
     }
   },
   "scripts": {
-    "prepare": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"

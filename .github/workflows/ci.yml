@@ -51,12 +51,22 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
-      # Build must run BEFORE typecheck: TypeScript resolves cross-workspace
-      # imports (e.g. @agentos/shared) through the workspace symlink to
-      # dist/index.d.ts, which only exists after a build. `npm ci` does
-      # NOT trigger workspace `prepare` scripts.
-      - name: Build (all workspaces, generates .d.ts)
-        run: npm run build
+      # Build workspaces in dependency order so consumers (collectors,
+      # backend, frontend) can resolve `@agentos/shared`'s dist/index.d.ts
+      # via the workspace symlink. `-w` runs workspaces serially in the
+      # order specified, and `-ws --if-present` runs in parallel — we
+      # explicitly want serial here.
+      - name: Build @agentos/shared (root of the dep graph)
+        run: npm run build -w @agentos/shared
+
+      - name: Build @agentos/collectors (depends on shared)
+        run: npm run build -w @agentos/collectors
+
+      - name: Build @agentos/backend (depends on shared + collectors)
+        run: npm run build -w @agentos/backend
+
+      - name: Build @agentos/frontend (depends on shared)
+        run: npm run build -w @agentos/frontend
 
       - name: Typecheck (all workspaces)
         run: npm run typecheck

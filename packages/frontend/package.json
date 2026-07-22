@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prepare": "npm run build",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "dev": "vite",
     "preview": "vite preview",
