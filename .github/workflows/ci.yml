@@ -51,14 +51,18 @@ jobs:
       - name: Install (npm ci)
         run: npm ci
 
+      # Build must run BEFORE typecheck: TypeScript resolves cross-workspace
+      # imports (e.g. @agentos/shared) through the workspace symlink to
+      # dist/index.d.ts, which only exists after a build. `npm ci` does
+      # NOT trigger workspace `prepare` scripts.
+      - name: Build (all workspaces, generates .d.ts)
+        run: npm run build
+
       - name: Typecheck (all workspaces)
         run: npm run typecheck
 
       - name: Test (all workspaces)
         run: npm test
-
-      - name: Build (all workspaces)
-        run: npm run build
 
       - name: Audit dependencies (non-blocking)
         # Surface known vulnerabilities without failing the build.
