@@ -161,9 +161,14 @@ export function normalizeTimestamp(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Convert `D--project-MY-foo` style names back into readable paths. */
+/**
+ * Convert `D--project-MY-foo` style names back into readable paths.
+ * Platform-agnostic: the source data is always Windows-style on Claude,
+ * so we always strip the `D--` drive prefix and collapse `--` → `/`
+ * regardless of where the collector runs.
+ */
 export function decodeClaudeProjectDir(name: string): string {
-  if (process.platform === 'win32' && /^[A-Za-z]--/.test(name)) {
+  if (/^[A-Za-z]--/.test(name)) {
     const drive = name[0];
     const rest = name.slice(3).replace(/-+/g, '/');
     return `${drive}:/${rest}`;
