@@ -5,10 +5,12 @@ import { AgentDetailPage } from './pages/AgentDetail';
 import { ProjectViewPage } from './pages/ProjectView';
 import { SettingsPage } from './pages/Settings';
 import { DataHealthPage } from './pages/DataHealth';
+import { TimelinePage } from './pages/Timeline';
 import { cn } from './lib/format';
 
 const NAV = [
   { to: '/', label: 'Overview', end: true },
+  { to: '/timeline', label: 'Timeline' },
   { to: '/agents', label: 'Agents' },
   { to: '/projects', label: 'Projects' },
   { to: '/data-health', label: 'Data Health' },
@@ -23,7 +25,7 @@ export function App() {
           <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-primary-foreground font-bold">A</div>
           <div>
             <div className="font-semibold leading-tight">AgentOS</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.4</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.5</div>
           </div>
         </div>
         <nav className="flex flex-col gap-1">
@@ -51,6 +53,7 @@ export function App() {
       <main className="min-w-0 flex-1 overflow-y-auto p-6 scrollbar-thin">
         <Routes>
           <Route path="/" element={<OverviewPage />} />
+          <Route path="/timeline" element={<TimelinePage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentDetailPage />} />
           <Route path="/projects" element={<ProjectViewPage />} />

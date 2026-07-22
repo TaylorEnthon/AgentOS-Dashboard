@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api, type AgentStatusDto, type OverviewDto } from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
@@ -184,30 +185,39 @@ function AgentStatusRow({ row }: { row: AgentStatusDto }) {
     row.status === 'active' ? 'bg-emerald-500' :
     row.status === 'idle' ? 'bg-amber-500' : 'bg-muted-foreground/40';
 
+  // Each row is a link to the full timeline filtered by this agent.
+  // v0.5: drill-down from Live → Timeline in one click.
   return (
-    <li className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
-      <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', dotColor)} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{row.agent}</span>
-          <Badge tone={tone}>{row.status}</Badge>
+    <li>
+      <Link
+        to={`/timeline?agent=${encodeURIComponent(row.agent)}`}
+        className="block rounded-md border border-border bg-background p-3 transition-colors hover:border-foreground/30 hover:bg-muted/40"
+      >
+        <div className="flex items-start gap-3">
+          <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', dotColor)} />
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">{row.agent}</span>
+              <Badge tone={tone}>{row.status}</Badge>
+            </div>
+            {row.lastProject && (
+              <div className="mt-0.5 truncate text-xs text-muted-foreground" title={row.lastProject}>
+                Project: <span className="font-mono">{row.lastProject}</span>
+              </div>
+            )}
+            {row.lastAction && (
+              <div className="truncate text-xs text-muted-foreground" title={row.lastAction}>
+                Last action: <span className="text-foreground">{row.lastAction}</span>
+              </div>
+            )}
+            {row.lastActivity && (
+              <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                Updated {formatRelative(row.lastActivity)} · open timeline →
+              </div>
+            )}
+          </div>
         </div>
-        {row.lastProject && (
-          <div className="mt-0.5 truncate text-xs text-muted-foreground" title={row.lastProject}>
-            Project: <span className="font-mono">{row.lastProject}</span>
-          </div>
-        )}
-        {row.lastAction && (
-          <div className="truncate text-xs text-muted-foreground" title={row.lastAction}>
-            Last action: <span className="text-foreground">{row.lastAction}</span>
-          </div>
-        )}
-        {row.lastActivity && (
-          <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-            Updated {formatRelative(row.lastActivity)}
-          </div>
-        )}
-      </div>
+      </Link>
     </li>
   );
 }

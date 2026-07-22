@@ -165,6 +165,33 @@ export interface AgentStatusDto {
   lastEventType?: string;
 }
 
+export type ActivityEventType =
+  | 'session-start'
+  | 'session-end'
+  | 'message'
+  | 'tool-call'
+  | 'file-read'
+  | 'file-write'
+  | 'file-edit'
+  | 'command'
+  | 'git-commit'
+  | 'status';
+
+export interface TimelineItemDto {
+  id: string;
+  agentId: string;
+  agentType: AgentType;
+  sessionId: string;
+  sessionTitle?: string | null;
+  project: string;
+  projectDisplay: string;
+  timestamp: string;
+  type: ActivityEventType;
+  action: string;
+  detail?: string | null;
+  meta?: Record<string, unknown> | null;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -202,4 +229,11 @@ export const api = {
 
   // v0.4
   agentStatus: () => http<AgentStatusDto[]>('/api/agents/status'),
+
+  // v0.5
+  timeline: (params: { agent?: string; project?: string; session?: string; from?: string; to?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => v !== undefined && v !== '' && q.set(k, String(v)));
+    return http<TimelineItemDto[]>(`/api/timeline${q.toString() ? `?${q.toString()}` : ''}`);
+  },
 };

@@ -233,6 +233,26 @@ export interface DataHealth {
   }>;
 }
 
+/**
+ * Pure projection over `activity_events ⨝ sessions`. Used by
+ * `/api/timeline` and the Timeline page. Never written — always derived.
+ */
+export interface TimelineItem {
+  id: string;
+  agentId: string;
+  agentType: AgentType;
+  sessionId: string;
+  sessionTitle?: string | null;
+  project: string;
+  projectDisplay: string;
+  timestamp: string;
+  type: ActivityEventType;
+  /** Human-readable summary; derived from `type` + `detail`. */
+  action: string;
+  detail?: string | null;
+  meta?: Record<string, unknown> | null;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

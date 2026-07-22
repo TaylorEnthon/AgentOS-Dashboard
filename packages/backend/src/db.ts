@@ -10,6 +10,7 @@ import type {
   DataHealth,
   ConfidenceLevel,
   SourceMeta,
+  TimelineItem,
 } from '@agentos/shared';
 
 export interface AgentRow {
@@ -426,6 +427,74 @@ export class Db {
     ).all(sessionId, limit) as EventRow[];
   }
 
+  /**
+   * v0.5 timeline projection: `activity_events ⨝ sessions`, optionally
+   * filtered. Always ordered newest-first so the UI's "scroll to bottom
+   * for oldest" stays natural.
+   */
+  listTimeline(opts: {
+    agentId?: string;
+    project?: string;
+    sessionId?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  } = {}): TimelineItem[] {
+    const limit = Math.max(1, Math.min(opts.limit ?? 200, 1000));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (opts.agentId) { where.push('e.agent_id = ?'); params.push(opts.agentId); }
+    if (opts.sessionId) { where.push('e.session_id = ?'); params.push(opts.sessionId); }
+    if (opts.project) { where.push('s.project = ?'); params.push(opts.project); }
+    if (opts.from) { where.push('e.timestamp >= ?'); params.push(opts.from); }
+    if (opts.to) { where.push('e.timestamp <= ?'); params.push(opts.to); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows = this.raw.prepare(
+      `SELECT
+         e.id            AS id,
+         e.agent_id      AS agent_id,
+         e.session_id    AS session_id,
+         s.title         AS session_title,
+         s.project       AS project,
+         s.project_display AS project_display,
+         e.timestamp     AS timestamp,
+         e.type          AS type,
+         e.detail        AS detail,
+         e.meta          AS meta
+       FROM activity_events e
+       LEFT JOIN sessions s ON s.id = e.session_id
+       ${whereSql}
+       ORDER BY e.timestamp DESC
+       LIMIT ${limit}`,
+    ).all(...params) as Array<{
+      id: string;
+      agent_id: string;
+      session_id: string;
+      session_title: string | null;
+      project: string | null;
+      project_display: string | null;
+      timestamp: string;
+      type: string;
+      detail: string | null;
+      meta: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      agentType: r.agent_id.split(':')[0] as AgentType,
+      sessionId: r.session_id,
+      sessionTitle: r.session_title,
+      project: r.project ?? '',
+      projectDisplay: r.project_display ?? r.project ?? '',
+      timestamp: r.timestamp,
+      type: r.type as TimelineItem['type'],
+      action: humanAction(r.type, r.detail),
+      detail: r.detail,
+      meta: r.meta ? (JSON.parse(r.meta) as Record<string, unknown>) : null,
+    }));
+  }
+
   // ---------------- Projects ----------------
   upsertProject(p: { path: string; displayName: string; lastSeen: string }): void {
     this.raw.prepare(
@@ -690,3 +759,31 @@ export class Db {
 
 // Re-export for convenience
 export type { SourceMeta };
+
+/**
+ * Format an activity_events row as a short human-readable action line
+ * for the Timeline UI. Centralized so the same wording is used in
+ * timeline rows, agent status rows, and anywhere else we surface events.
+ */
+export function humanAction(type: string, detail: string | null): string {
+  if (detail && detail.trim().length > 0) {
+    return `${typeLabel(type)} · ${detail.length > 160 ? detail.slice(0, 157) + '…' : detail}`;
+  }
+  return typeLabel(type);
+}
+
+function typeLabel(type: string): string {
+  switch (type) {
+    case 'session-start': return 'Session started';
+    case 'session-end':   return 'Session ended';
+    case 'message':        return 'Message';
+    case 'tool-call':      return 'Tool call';
+    case 'file-read':      return 'Read file';
+    case 'file-write':     return 'Write file';
+    case 'file-edit':      return 'Edit file';
+    case 'command':        return 'Run command';
+    case 'git-commit':     return 'Git commit';
+    case 'status':         return 'Status';
+    default:               return type;
+  }
+}

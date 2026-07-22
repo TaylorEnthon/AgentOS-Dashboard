@@ -16,7 +16,7 @@ export function registerRoutes(
   app.get('/api/health', async () => ({
     ok: true,
     ts: new Date().toISOString(),
-    version: '0.4.0',
+    version: '0.5.0',
   }));
 
   app.get('/api/overview', async () => {
@@ -101,6 +101,29 @@ export function registerRoutes(
       }).map(rowToSessionDto);
     },
   );
+
+  /* ---------- v0.5 timeline ---------- */
+
+  app.get<{
+    Querystring: {
+      agent?: string;
+      project?: string;
+      session?: string;
+      from?: string;
+      to?: string;
+      limit?: string;
+    };
+  }>('/api/timeline', async (req) => {
+    const { agent, project, session, from, to, limit } = req.query;
+    return db.listTimeline({
+      agentId: agent,
+      project,
+      sessionId: session,
+      from,
+      to,
+      limit: limit ? Number(limit) : undefined,
+    });
+  });
 
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (req, reply) => {
     const row = db.getSession(req.params.id);
