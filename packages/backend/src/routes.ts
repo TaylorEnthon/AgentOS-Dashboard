@@ -4,12 +4,19 @@ import { Scheduler } from './scheduler.js';
 import { DEFAULT_PRICING } from '@agentos/shared';
 import type { SettingsStore } from './settings.js';
 import type { ConfidenceLevel } from '@agentos/shared';
+import { eventBus, type RealtimeEvent } from './event-bus.js';
+import { deriveAgentStatus, type AgentStatusRow } from './agent-status.js';
 
-export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Scheduler, settings: SettingsStore): void {
+export function registerRoutes(
+  app: FastifyInstance,
+  db: Db,
+  scheduler: Scheduler,
+  settings: SettingsStore,
+): void {
   app.get('/api/health', async () => ({
     ok: true,
     ts: new Date().toISOString(),
-    version: '0.2.0',
+    version: '0.4.0',
   }));
 
   app.get('/api/overview', async () => {
@@ -48,6 +55,14 @@ export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Schedule
       };
     });
   });
+
+  /* ---------------- v0.4 runtime status ---------------- */
+
+  app.get('/api/agents/status', async () => {
+    return deriveAgentStatus(db.raw);
+  });
+
+  /* ---------------- existing endpoints ---------------- */
 
   app.get<{ Params: { id: string } }>('/api/agents/:id', async (req, reply) => {
     const row = db.getAgent(req.params.id);
@@ -101,11 +116,11 @@ export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Schedule
 
   app.post<{ Body: { forceFull?: boolean } }>('/api/refresh', async (req) => {
     const forceFull = req.body?.forceFull === true;
-    const reports = await scheduler.scanAll({ forceFull });
+    const reports = await scheduler.scanAll('manual');
     return { ok: true, ts: new Date().toISOString(), mode: forceFull ? 'full' : 'auto', reports };
   });
 
-  /* ---------- v0.2 endpoints ---------- */
+  /* ---------------- v0.2 endpoints ---------------- */
 
   app.get('/api/data-health', async () => db.dataHealth());
 
@@ -117,7 +132,71 @@ export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Schedule
     return db.listIngestionFiles(provider);
   });
 
-  /* ---------- settings ---------- */
+  /* ---------------- v0.4 SSE stream ---------------- */
+
+  app.get('/api/events/stream', async (req, reply) => {
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    // Hint reverse proxies / browsers to flush immediately.
+    reply.raw.flushHeaders?.();
+
+    const send = (ev: RealtimeEvent): void => {
+      try {
+        reply.raw.write(`event: ${ev.type}\n`);
+        reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+      } catch {
+        /* socket closed */
+      }
+    };
+
+    // Heartbeat keeps proxies + browsers happy; 15s is a good middle ground.
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(`: keep-alive ${Date.now()}\n\n`);
+      } catch {
+        /* socket closed */
+      }
+    }, 15_000);
+
+    const unsub = eventBus.subscribe(send);
+    // Also send an initial snapshot of agent statuses so the UI can paint
+    // something immediately even before any scan completes.
+    send({
+      type: 'agent_status',
+      ts: new Date().toISOString(),
+      agent: '__snapshot__',
+      status: 'unknown',
+    });
+    for (const row of deriveAgentStatus(db.raw)) {
+      send({
+        type: 'agent_status',
+        ts: new Date().toISOString(),
+        agent: row.agent,
+        status: row.status,
+        lastActivity: row.lastActivity,
+        lastProject: row.lastProject,
+        lastAction: row.lastAction,
+      });
+    }
+
+    req.raw.on('close', () => {
+      clearInterval(heartbeat);
+      unsub();
+      try {
+        reply.raw.end();
+      } catch {
+        /* already closed */
+      }
+    });
+
+    // Returning the reply tells Fastify the response is being streamed
+    // and not to auto-serialize.
+    return reply;
+  });
+
+  /* ---------------- settings ---------------- */
 
   app.get('/api/settings', async () => {
     const s = await settings.load();
@@ -165,12 +244,14 @@ function rowToSessionDto(r: import('./db.js').SessionRow) {
     toolCalls: r.tool_calls,
     usageConfidence: r.usage_confidence ?? undefined,
     costConfidence: r.cost_confidence ?? undefined,
-    source: r.source_file ? {
-      sourceFile: r.source_file,
-      sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
-      sourceId: r.source_id ?? r.id,
-      collectedAt: r.collected_at ?? '',
-    } : undefined,
+    source: r.source_file
+      ? {
+          sourceFile: r.source_file,
+          sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+          sourceId: r.source_id ?? r.id,
+          collectedAt: r.collected_at ?? '',
+        }
+      : undefined,
   };
 }
 
@@ -183,12 +264,14 @@ function rowToEventDto(r: import('./db.js').EventRow) {
     timestamp: r.timestamp,
     detail: r.detail,
     meta: r.meta ? JSON.parse(r.meta) : undefined,
-    source: r.source_file ? {
-      sourceFile: r.source_file,
-      sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
-      sourceId: r.source_id ?? r.id,
-      collectedAt: r.collected_at ?? '',
-    } : undefined,
+    source: r.source_file
+      ? {
+          sourceFile: r.source_file,
+          sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+          sourceId: r.source_id ?? r.id,
+          collectedAt: r.collected_at ?? '',
+        }
+      : undefined,
   };
 }
 
@@ -216,6 +299,8 @@ function fillDailyGaps(rows: Array<{ date: string; tokens: number; cost: number;
   }
   return out;
 }
+
+export type { RealtimeEvent, AgentStatusRow };
 
 // Re-export for type completeness
 export type { ConfidenceLevel };

@@ -154,6 +154,17 @@ export interface IngestionFileDto {
   duplicates_prevented: number;
 }
 
+export type AgentStatus = 'active' | 'idle' | 'unknown';
+
+export interface AgentStatusDto {
+  agent: string;
+  status: AgentStatus;
+  lastActivity?: string;
+  lastProject?: string;
+  lastAction?: string;
+  lastEventType?: string;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -188,4 +199,7 @@ export const api = {
   dataHealth: () => http<DataHealthDto>('/api/data-health'),
   ingestionFiles: (provider?: AgentType) =>
     http<IngestionFileDto[]>(`/api/ingestion-files${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
+
+  // v0.4
+  agentStatus: () => http<AgentStatusDto[]>('/api/agents/status'),
 };

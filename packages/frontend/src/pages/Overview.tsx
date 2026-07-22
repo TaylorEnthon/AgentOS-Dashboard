@@ -5,6 +5,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Table, TBody, TD, TH, THead, TR } from '../components/ui/table';
 import { BarChart, LineChart } from '../components/charts';
+import { LiveActivity } from '../components/LiveActivity';
 import { formatCompact, formatRelative, formatUSD, statusColor } from '../lib/format';
 import { formatCost } from '@agentos/shared';
 
@@ -47,6 +48,8 @@ export function OverviewPage() {
           {refreshing ? 'Refreshing…' : 'Refresh now'}
         </Button>
       </header>
+
+      <LiveActivity initialOverview={data} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Active agents" value={`${data.enabledAgents}`} sub={`of ${data.totalAgents} installed`} />

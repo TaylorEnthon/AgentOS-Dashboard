@@ -23,7 +23,7 @@ export function App() {
           <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-primary-foreground font-bold">A</div>
           <div>
             <div className="font-semibold leading-tight">AgentOS</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.2</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.4</div>
           </div>
         </div>
         <nav className="flex flex-col gap-1">
@@ -44,7 +44,7 @@ export function App() {
           ))}
         </nav>
         <div className="mt-8 rounded-md border border-border bg-background p-3 text-xs text-muted-foreground">
-          Polls each installed Agent every minute. Click <strong>Refresh</strong> on Overview to scan now.
+          Live SSE stream + 60s polling fallback. Click <strong>Refresh</strong> on Overview to scan now.
         </div>
       </aside>
 
