@@ -461,6 +461,52 @@ export interface WorkspaceHealthSummaryDto {
   computedAt: string;
 }
 
+/* ---------------- v1.4: Health Memory & Trend ---------------- */
+
+export interface HealthSnapshotHistoryDto {
+  id?: number;
+  executionId: string;
+  score: number;
+  level: HealthLevel;
+  derivedStatus: DerivedLifecycleStatus;
+  factors: HealthFactorDto[];
+  createdAt: string;
+}
+
+export type HealthTrendDirection = 'improving' | 'degrading' | 'stable';
+
+export interface HealthTrendDto {
+  direction: HealthTrendDirection;
+  scoreDelta: number;
+  samples: number;
+  summary: string;
+  from: string | null;
+  to: string;
+}
+
+export type AttentionLifecycleState = 'detected' | 'ongoing' | 'recovered';
+
+export interface AttentionHistoryEntryDto {
+  id?: number;
+  executionId: string;
+  attentionKey: string;
+  lifecycle: AttentionLifecycleState;
+  severity: AttentionSeverity;
+  reason: string;
+  createdAt: string;
+}
+
+export interface AgentReliabilitySummaryDto {
+  agentType: string;
+  totalExecutions: number;
+  completedExecutions: number;
+  failedExecutions: number;
+  reliabilityScore: number;
+  failureRate: number;
+  averageRecoveryTimeMs: number | null;
+  computedAt: string;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -610,4 +656,19 @@ export const api = {
     http<AttentionItemDto[]>(`/api/attention${limit != null ? `?limit=${limit}` : ''}`),
   workspaceSummary: () =>
     http<WorkspaceHealthSummaryDto>('/api/workspace/summary'),
+  // v1.4: Health Memory & Trend
+  executionHealthHistory: (id: string, limit?: number) =>
+    http<HealthSnapshotHistoryDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/health/history${limit != null ? `?limit=${limit}` : ''}`,
+    ),
+  executionHealthTrend: (id: string, limit?: number) =>
+    http<HealthTrendDto>(
+      `/api/executions/${encodeURIComponent(id)}/health/trend${limit != null ? `?limit=${limit}` : ''}`,
+    ),
+  executionAttentionHistory: (id: string, limit?: number) =>
+    http<AttentionHistoryEntryDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/attention/history${limit != null ? `?limit=${limit}` : ''}`,
+    ),
+  agentsReliability: () =>
+    http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
 };

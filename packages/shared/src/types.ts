@@ -733,6 +733,93 @@ export interface WorkspaceHealthSummary {
   computedAt: string;
 }
 
+/* ---------------- v1.4: Health Memory & Trend ---------------- */
+
+/**
+ * One recorded health sample. Persisted in the in-memory
+ * HealthHistoryStore; never written to sessions / activity_events.
+ *
+ * Insertion is gated by `shouldRecordHealthSnapshot` — we only write
+ * when the level changes OR a fixed time window has elapsed.
+ */
+export interface HealthSnapshotHistory {
+  /** Optional row id (only set by the in-memory store). */
+  id?: number;
+  executionId: string;
+  score: number;
+  level: HealthLevel;
+  /** Derived status at the time of recording (for cross-correlation). */
+  derivedStatus: DerivedLifecycleStatus;
+  factors: HealthFactor[];
+  createdAt: string;
+}
+
+/**
+ * Trend classification for a sequence of HealthSnapshotHistory rows.
+ */
+export type HealthTrendDirection = 'improving' | 'degrading' | 'stable';
+
+/**
+ * Pure projection: given N+1 snapshots, summarize the trajectory.
+ * `scoreDelta` is the latest minus the oldest of the supplied window.
+ * `samples` is the number of rows used.
+ */
+export interface HealthTrend {
+  direction: HealthTrendDirection;
+  /** Latest - oldest, in score points. Positive = improving. */
+  scoreDelta: number;
+  samples: number;
+  /** One-line human-readable summary. */
+  summary: string;
+  /** ISO timestamp of the oldest sample in the analyzed window, or null. */
+  from: string | null;
+  /** ISO timestamp of the latest sample in the analyzed window. */
+  to: string;
+}
+
+/**
+ * Three-state lifecycle of an attention key (one entry per
+ * (executionId, recommendedAction)). Tracking state lets us show
+ * "this conflict appeared 2h ago and is still ongoing" rather than
+ * "still in queue right now".
+ */
+export type AttentionLifecycleState = 'detected' | 'ongoing' | 'recovered';
+
+/**
+ * One row in the attention lifecycle log. Persisted in the
+ * AttentionHistoryStore (in-memory).
+ */
+export interface AttentionHistoryEntry {
+  id?: number;
+  executionId: string;
+  /** Stable key for the attention — currently the `recommendedAction` value. */
+  attentionKey: string;
+  lifecycle: AttentionLifecycleState;
+  severity: AttentionSeverity;
+  reason: string;
+  createdAt: string;
+}
+
+/**
+ * Per-agent reliability rollup. Computed on demand from a list of
+ * HealthSnapshotHistory rows (or any other health samples).
+ */
+export interface AgentReliabilitySummary {
+  agentType: string;
+  /** Total samples used for the rollup. */
+  totalExecutions: number;
+  completedExecutions: number;
+  failedExecutions: number;
+  /** 0..100, weighted by recent samples if available. */
+  reliabilityScore: number;
+  /** failed / total (NaN-safe; 0 when total = 0). */
+  failureRate: number;
+  /** Average ms from `failed` -> `completed` transition; null if no transitions. */
+  averageRecoveryTimeMs: number | null;
+  /** When this rollup was computed. */
+  computedAt: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

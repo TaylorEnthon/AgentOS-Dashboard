@@ -279,6 +279,9 @@ export function WorkspacePage() {
       {/* v1.3: Attention Queue */}
       <AttentionQueueSection items={attention} />
 
+      {/* v1.4: Agent Reliability */}
+      <AgentReliabilitySection />
+
       {/* Six-column board */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {COLUMNS.map((col) => {
@@ -448,6 +451,90 @@ function AttentionQueueSection({ items }: { items: AttentionItemDto[] }) {
             Showing 10 of {items.length} items.
           </p>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * v1.4: per-agent reliability rollup. Shows for each agent:
+ *   - reliabilityScore (0-100, where 100 = no failures)
+ *   - failureRate (0..1)
+ *   - averageRecoveryTimeMs (or null)
+ * Pure presentational — fetches from /api/agents/reliability.
+ */
+function AgentReliabilitySection() {
+  const [items, setItems] = useState<import('../lib/api').AgentReliabilitySummaryDto[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const { events: realtimeEvents } = useSse('/api/events/stream', {
+    types: ['lifecycle_changed', 'file_changed', 'scan_completed'],
+    bufferSize: 5,
+  });
+
+  const refresh = () => {
+    api.agentsReliability()
+      .then((rows) => { setItems(rows); setErr(null); })
+      .catch((e) => setErr(String(e)));
+  };
+  useEffect(() => { refresh(); }, []);
+  // Re-fetch on activity events.
+  useEffect(() => {
+    if (realtimeEvents.length === 0) return;
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtimeEvents.length]);
+
+  if (err) return null;
+  if (items.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle>Agent Reliability</CardTitle>
+        <CardDescription>
+          Per-agent rollup computed from persistent health snapshots.
+          Higher = more reliable (no failures yet).
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map((it) => (
+            <li key={it.agentType} className="rounded-md border border-border bg-background p-3 text-xs">
+              <div className="flex items-center justify-between">
+                <code className="font-mono text-sm">{it.agentType}</code>
+                <span className={cn(
+                  'rounded-full px-2 py-0.5 text-[10px] font-medium tabular-nums',
+                  it.reliabilityScore >= 80 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' :
+                  it.reliabilityScore >= 50 ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                             'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300',
+                )}>
+                  {it.reliabilityScore}
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-1 text-[10px] text-muted-foreground">
+                <div>
+                  <div className="uppercase tracking-wider text-muted-foreground/70">Total</div>
+                  <div className="font-mono text-foreground tabular-nums">{it.totalExecutions}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-muted-foreground/70">Failed</div>
+                  <div className="font-mono text-foreground tabular-nums">{it.failedExecutions}</div>
+                </div>
+                <div>
+                  <div className="uppercase tracking-wider text-muted-foreground/70">Failure</div>
+                  <div className="font-mono text-foreground tabular-nums">{(it.failureRate * 100).toFixed(1)}%</div>
+                </div>
+              </div>
+              {it.averageRecoveryTimeMs != null && (
+                <div className="mt-2 text-[10px] text-muted-foreground">
+                  Avg recovery: <span className="font-mono text-foreground/80 tabular-nums">
+                    {formatDuration(it.averageRecoveryTimeMs)}
+                  </span>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
       </CardContent>
     </Card>
   );

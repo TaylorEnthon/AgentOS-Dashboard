@@ -27,6 +27,12 @@ import {
   computeWorkspaceSummary,
   explainLifecycle,
 } from './lifecycle-health.js';
+import {
+  analyzeHealthTrend,
+  attentionHistoryStore,
+  computeAgentReliability,
+  healthHistoryStore,
+} from './health-history.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -768,6 +774,23 @@ export function registerRoutes(
     const conflict = detectLifecycleConflict(req.params.id, snapshot, manual);
     const score = computeHealthScore({ snapshot, conflict });
     const explanation = explainLifecycle(snapshot, conflict);
+
+    // v1.4: record health snapshot into in-memory history (deduped).
+    const prevSnap = healthHistoryStore.latest(req.params.id);
+    if (healthHistoryStore.shouldRecord(prevSnap, {
+      score: score.score,
+      level: score.level,
+      derivedStatus: snapshot.derivedStatus,
+      factors: score.factors,
+    }, Date.now())) {
+      healthHistoryStore.append(req.params.id, {
+        score: score.score,
+        level: score.level,
+        derivedStatus: snapshot.derivedStatus,
+        factors: score.factors,
+        createdAt: new Date().toISOString(),
+      });
+    }
     return { score, explanation };
   });
 
@@ -826,7 +849,11 @@ export function registerRoutes(
         inputs.push({ executionId: execId, snapshot, conflict });
       }
     }
-    return buildAttentionQueue(inputs).slice(0, lim);
+    const queue = buildAttentionQueue(inputs);
+    // v1.4: reconcile against in-memory history to record
+    // detected/ongoing/recovered transitions.
+    attentionHistoryStore.reconcileFromQueue(queue);
+    return queue.slice(0, lim);
   });
 
   // v1.3-d: Workspace Health Summary — aggregate counts + longest running.
@@ -881,6 +908,70 @@ export function registerRoutes(
       health: healthInputs,
       conflicts: conflictInputs,
     });
+  });
+
+  /* ---------------- v1.4: Health Memory & Trend ---------------- */
+
+  // v1.4-a: per-execution health snapshot history.
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/api/executions/:id/health/history',
+    async (req) => {
+      const lastColon = req.params.id.lastIndexOf(':exec-');
+      if (lastColon < 0) return [];
+      const sessionId = req.params.id.slice(0, lastColon);
+      if (!db.getSession(sessionId)) return [];
+      const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 100;
+      return healthHistoryStore.read(req.params.id, lim);
+    },
+  );
+
+  // v1.4-b: per-execution health trend (direction + delta + samples).
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/api/executions/:id/health/trend',
+    async (req) => {
+      const lastColon = req.params.id.lastIndexOf(':exec-');
+      if (lastColon < 0) return [];
+      const sessionId = req.params.id.slice(0, lastColon);
+      if (!db.getSession(sessionId)) return [];
+      const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 50;
+      const history = healthHistoryStore.read(req.params.id, lim);
+      return analyzeHealthTrend(history);
+    },
+  );
+
+  // v1.4-c: per-execution attention lifecycle history.
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/api/executions/:id/attention/history',
+    async (req) => {
+      const lastColon = req.params.id.lastIndexOf(':exec-');
+      if (lastColon < 0) return [];
+      const sessionId = req.params.id.slice(0, lastColon);
+      if (!db.getSession(sessionId)) return [];
+      const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 100;
+      return attentionHistoryStore.read(req.params.id, lim);
+    },
+  );
+
+  // v1.4-d: agent-level reliability rollup. Aggregates from the global
+  // health history store across all known executionIds.
+  app.get('/api/agents/reliability', async () => {
+    // Build the agentTypes map by walking sessions.
+    const agentTypes = new Map<string, import('@agentos/shared').AgentType>();
+    for (const s of db.listSessions({ limit: 1000 })) {
+      const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const groups = groupEventsIntoExecutions(events);
+      for (let i = 0; i < groups.length; i++) {
+        const execId = `${s.id}:exec-${i}`;
+        const agent = s.agent_id.split(':')[0] as import('@agentos/shared').AgentType;
+        agentTypes.set(execId, agent);
+      }
+    }
+    // Aggregate from the health history store (in-memory).
+    const allHistory: import('@agentos/shared').HealthSnapshotHistory[] = [];
+    for (const execId of new Set(agentTypes.keys())) {
+      allHistory.push(...healthHistoryStore.read(execId, 1000));
+    }
+    return computeAgentReliability(allHistory, agentTypes);
   });
 
   /* ---------------- v0.6 Git integration ---------------- */

@@ -109,6 +109,12 @@ export function ExecutionDetailPage() {
       {/* v1.1: derived lifecycle snapshot (read-only intelligence). */}
       <LifecycleSnapshotCard executionId={data.id} />
 
+      {/* v1.4: persistent health trend + history */}
+      <HealthTrendBlock executionId={data.id} />
+
+      {/* v1.4: attention lifecycle history */}
+      <AttentionLifecycleBlock executionId={data.id} />
+
       {/* Commits produced by this execution */}
       <Card>
         <CardHeader>
@@ -456,6 +462,177 @@ function HealthBlock({ health }: {
         </details>
       )}
     </div>
+  );
+}
+
+/* ---------------- v1.4: Health Trend + History ---------------- */
+
+function HealthTrendBlock({ executionId }: { executionId: string }) {
+  const [trend, setTrend] = useState<import('../lib/api').HealthTrendDto | null>(null);
+  const [history, setHistory] = useState<import('../lib/api').HealthSnapshotHistoryDto[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = () => {
+    Promise.all([
+      api.executionHealthTrend(executionId, 50).catch(() => null),
+      api.executionHealthHistory(executionId, 50).catch(() => []),
+    ])
+      .then(([t, h]) => { setTrend(t); setHistory(h); setErr(null); })
+      .catch((e) => setErr(String(e)));
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    refresh();
+    const t = setInterval(() => { if (!cancelled) refresh(); }, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executionId]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Health Trend</CardTitle>
+        <CardDescription>
+          Persistent history of this execution's health. Records when the
+          level changes or every 5 minutes (whichever comes first). Read-only.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && !trend && (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        )}
+        {trend && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">Direction:</span>
+              <TrendBadge direction={trend.direction} />
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {trend.samples} sample{trend.samples === 1 ? '' : 's'} · scoreDelta {trend.scoreDelta >= 0 ? '+' : ''}{trend.scoreDelta}
+              </span>
+            </div>
+            <p className="text-sm text-foreground/90">{trend.summary}</p>
+            {history.length > 0 && (
+              <MiniSparkline history={history} />
+            )}
+            {history.length > 0 && (
+              <details className="text-xs text-muted-foreground">
+                <summary className="cursor-pointer text-[10px] uppercase tracking-wider">
+                  Show {history.length} snapshot{history.length === 1 ? '' : 's'}
+                </summary>
+                <ul className="mt-1 space-y-0.5 max-h-48 overflow-auto">
+                  {history.slice().reverse().map((h) => (
+                    <li key={h.id ?? h.createdAt} className="flex items-baseline gap-2 text-[11px]">
+                      <time className="font-mono text-[10px] tabular-nums">{formatRelative(h.createdAt)}</time>
+                      <span className="text-foreground/80 tabular-nums">{h.score}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80">{h.level}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TrendBadge({ direction }: { direction: import('../lib/api').HealthTrendDirection }) {
+  const tone =
+    direction === 'improving' ? 'success' :
+    direction === 'degrading' ? 'danger'  :
+                                    'muted';
+  const icon = direction === 'improving' ? '↗' :
+                direction === 'degrading' ? '↘' :
+                                              '→';
+  return <Badge tone={tone} className="text-[10px]">{icon} {direction}</Badge>;
+}
+
+function MiniSparkline({ history }: { history: import('../lib/api').HealthSnapshotHistoryDto[] }) {
+  if (history.length < 2) return null;
+  const width = 100;
+  const height = 30;
+  const scores = history.map((h) => h.score);
+  const min = 0;
+  const max = 100;
+  const stepX = width / (history.length - 1);
+  const points = history.map((h, i) => {
+    const x = i * stepX;
+    const y = height - ((h.score - min) / (max - min)) * (height - 4) - 2;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  });
+  const path = `M ${points.join(' L ')}`;
+  const lastScore = scores[scores.length - 1]!;
+  const lastX = (history.length - 1) * stepX;
+  const lastY = height - ((lastScore - min) / (max - min)) * (height - 4) - 2;
+  return (
+    <div className="rounded border border-border bg-muted/20 p-1">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="w-full" style={{ height }}>
+        <path d={path} fill="none" stroke="currentColor" strokeWidth="1" className="text-primary" />
+        <circle cx={lastX} cy={lastY} r="1.5" className="fill-primary" />
+      </svg>
+    </div>
+  );
+}
+
+/* ---------------- v1.4: Attention Lifecycle ---------------- */
+
+function AttentionLifecycleBlock({ executionId }: { executionId: string }) {
+  const [items, setItems] = useState<import('../lib/api').AttentionHistoryEntryDto[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.executionAttentionHistory(executionId, 50)
+      .then((rows) => { if (!cancelled) { setItems(rows); setErr(null); } })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executionId]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Attention Lifecycle</CardTitle>
+        <CardDescription>
+          Detected / ongoing / recovered transitions for this execution's
+          attention items. Updates when the queue changes.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && items.length === 0 && (
+          <p className="text-sm text-muted-foreground">No attention history yet.</p>
+        )}
+        {items.length > 0 && (
+          <ol className="space-y-1">
+            {items.slice().reverse().map((it) => (
+              <li key={it.id ?? `${it.createdAt}-${it.attentionKey}`} className="flex items-start gap-2 text-xs">
+                <span className={cn(
+                  'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+                  it.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
+                  it.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                                'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+                )}>
+                  {it.lifecycle}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-2">
+                    <code className="font-mono text-[10px] text-muted-foreground">{it.attentionKey}</code>
+                    <span className="text-[10px] text-muted-foreground/80">{formatRelative(it.createdAt)}</span>
+                  </div>
+                  <p className="text-foreground/90 truncate" title={it.reason}>{it.reason}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
