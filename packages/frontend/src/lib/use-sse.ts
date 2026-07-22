@@ -98,6 +98,7 @@ export function useSse(path: string, opts: UseSseOptions = {}): UseSseResult {
         'scan_completed',
         'file_changed',
         'agent_status',
+        'lifecycle_changed', // v1.2: lifecycle runtime
       ]) {
         es.addEventListener(t, onMessage as EventListener);
       }

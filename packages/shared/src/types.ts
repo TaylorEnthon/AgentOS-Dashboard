@@ -594,6 +594,43 @@ export interface LifecycleSnapshot {
   computedAt: string;
 }
 
+/**
+ * v1.2: manual vs derived mismatch detection.
+ *
+ * The user-set manualStatus is the source of truth (UI source of
+ * authority), but it can drift out of sync with what the system
+ * thinks the agent is doing (derivedStatus). When they disagree, we
+ * surface a read-only LifecycleConflict for the UI to warn the user
+ * — but we never auto-mutate the user's manual choice.
+ */
+export interface LifecycleConflict {
+  executionId: string;
+  /** The user's override, or null when no manual is set. */
+  manualStatus: import('@agentos/shared').ManualExecutionStatus | null;
+  derivedStatus: DerivedLifecycleStatus;
+  confidence: LifecycleConfidence;
+  reason: string;
+  /** True iff manual and derived disagree on "completion-ish" buckets. */
+  isConflict: boolean;
+  /** Short label like "done vs running" for compact display. */
+  label: string | null;
+}
+
+/**
+ * v1.2: SSE event payload published when the cached lifecycle
+ * snapshot for an execution changes (different derivedStatus from
+ * the previous cached value). Slim on purpose — frontend refetches
+ * the full snapshot via `/api/executions/:id/lifecycle`.
+ */
+export interface LifecycleChangedPayload {
+  executionId: string;
+  derivedStatus: DerivedLifecycleStatus;
+  confidence: LifecycleConfidence;
+  /** The previous derivedStatus in cache, or null on first emission. */
+  previousDerivedStatus: DerivedLifecycleStatus | null;
+  reason: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

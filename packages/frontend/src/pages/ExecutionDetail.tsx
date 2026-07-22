@@ -12,6 +12,7 @@ import {
   type EffectiveExecutionStatus,
   type ExecutionDetailDto,
   type ExecutionMetadataDto,
+  type LifecycleConflictDto,
   type ManualExecutionStatus,
 } from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
@@ -19,6 +20,7 @@ import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Table, TBody, TD, TH, THead, TR } from '../components/ui/table';
 import { agentColor, cn, formatCompact, formatDate, formatRelative, formatUSD } from '../lib/format';
+import { useSse } from '../lib/use-sse';
 
 const MANUAL_STATUSES: Array<{ value: '' | ManualExecutionStatus; label: string }> = [
   { value: '',                label: 'Auto (use derived status)' },
@@ -286,17 +288,45 @@ function StatusBadge({ status }: { status: EffectiveExecutionStatus }) {
 
 function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
   const [snap, setSnap] = useState<import('../lib/api').LifecycleSnapshotDto | null>(null);
+  const [conflict, setConflict] = useState<LifecycleConflictDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  const refresh = () => {
+    Promise.all([
+      api.executionLifecycle(executionId),
+      api.executionConflict(executionId),
+    ])
+      .then(([s, c]) => { setSnap(s); setConflict(c); setErr(null); })
+      .catch((e) => setErr(String(e)));
+  };
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => api.executionLifecycle(executionId)
-      .then((s) => { if (!cancelled) { setSnap(s); setErr(null); } })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    const load = () => {
+      if (cancelled) return;
+      refresh();
+    };
     load();
-    const t = setInterval(load, 30_000); // refresh every 30s for "running" freshness
+    // 30s polling fallback (covers SSE gaps / backend restart).
+    const t = setInterval(load, 30_000);
     return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [executionId]);
+
+  // v1.2: subscribe to lifecycle_changed events. Refresh on any event
+  // for THIS executionId (other executions' changes are ignored).
+  const { events: lifecycleEvents } = useSse('/api/events/stream', {
+    types: ['lifecycle_changed'],
+    bufferSize: 10,
+  });
+  useEffect(() => {
+    if (lifecycleEvents.length === 0) return;
+    const last = lifecycleEvents[lifecycleEvents.length - 1] as { executionId?: string };
+    if (last.executionId === executionId) {
+      refresh();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lifecycleEvents.length, executionId]);
 
   return (
     <Card>
@@ -304,8 +334,8 @@ function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
         <CardTitle>Lifecycle Intelligence</CardTitle>
         <CardDescription>
           Read-only snapshot derived from activity events, commits, and
-          timestamps. Updates automatically every 30 seconds. Manual
-          status (above) takes precedence over this view.
+          timestamps. Refreshes via SSE on lifecycle changes + every 30s
+          fallback. Manual status (above) takes precedence over this view.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -315,6 +345,20 @@ function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
         )}
         {snap && (
           <div className="space-y-3">
+            {conflict?.isConflict && (
+              <div className="rounded-md border border-rose-300/60 bg-rose-50/60 px-3 py-2 text-xs text-rose-900 dark:border-rose-700/60 dark:bg-rose-950/30 dark:text-rose-200">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">⚠ Manual vs derived conflict</span>
+                  <span className="text-rose-700 dark:text-rose-300">{conflict.label ?? `${conflict.manualStatus} vs ${conflict.derivedStatus}`}</span>
+                </div>
+                <p className="mt-1 text-[11px] text-rose-700/90 dark:text-rose-300/80">
+                  You set this to <strong>{conflict.manualStatus}</strong>, but the
+                  system thinks it's <strong>{conflict.derivedStatus}</strong>{' '}
+                  ({conflict.confidence} confidence). The manual value wins — review
+                  if your intent is stale.
+                </p>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs uppercase tracking-wider text-muted-foreground">Derived:</span>
               <DerivedBadge status={snap.derivedStatus} />

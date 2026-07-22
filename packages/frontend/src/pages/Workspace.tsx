@@ -23,12 +23,14 @@ import {
   type AgentStatusDto,
   type DerivedLifecycleStatus,
   type ExecutionBoardColumn,
+  type LifecycleConflictDto,
   type LifecycleSnapshotDto,
 } from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { agentColor, cn, formatCompact, formatRelative, formatUSD } from '../lib/format';
+import { useSse } from '../lib/use-sse';
 
 interface ColumnDef {
   key: ExecutionBoardColumn;
@@ -65,8 +67,40 @@ export function WorkspacePage() {
   const [agents, setAgents] = useState<AgentStatusDto[]>([]);
   /** v1.1: derived lifecycle snapshots keyed by execution id. */
   const [lifecycleMap, setLifecycleMap] = useState<Record<string, LifecycleSnapshotDto>>({});
+  /** v1.2: manual vs derived conflict map. */
+  const [conflictMap, setConflictMap] = useState<Record<string, LifecycleConflictDto>>({});
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+
+  // v1.2: refetch lifecycle + conflicts when SSE reports activity or
+  // lifecycle changes. The handler is debounced lightly so a burst
+  // of events doesn't trigger N+1 round trips.
+  const { events: realtimeEvents } = useSse('/api/events/stream', {
+    types: ['file_changed', 'scan_completed', 'lifecycle_changed'],
+    bufferSize: 20,
+  });
+  useEffect(() => {
+    if (realtimeEvents.length === 0) return;
+    if (items.length === 0) return;
+    // Re-fetch lifecycle + conflict for the whole visible set.
+    // Cheap because batch endpoint is one HTTP call.
+    const ids = items.map((r) => r.id);
+    Promise.all([api.lifecycleBatch(ids), api.conflictBatch(ids)])
+      .then(([snap, conf]) => {
+        setLifecycleMap(snap);
+        setConflictMap(conf);
+      })
+      .catch(() => undefined);
+    // Also refetch executions when activity changes (file_changed / scan_completed)
+    // so newly-completed / new events surface.
+    const hadActivity = realtimeEvents.some(
+      (e) => e.type === 'file_changed' || e.type === 'scan_completed',
+    );
+    if (hadActivity) {
+      load(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realtimeEvents.length]);
 
   const agent = searchParams.get('agent') ?? '';
   const project = searchParams.get('project') ?? '';
@@ -97,12 +131,16 @@ export function WorkspacePage() {
           setErr(null);
           // v1.1: fetch derived lifecycle snapshots in one batch call
           // so each card can show its derived state alongside manual.
+          // v1.2: also fetch conflict map for the conflict warning.
           if (rows.length > 0) {
-            api.lifecycleBatch(rows.map((r) => r.id))
-              .then(setLifecycleMap)
-              .catch(() => undefined);
+            const ids = rows.map((r) => r.id);
+            Promise.all([
+              api.lifecycleBatch(ids).then(setLifecycleMap).catch(() => undefined),
+              api.conflictBatch(ids).then(setConflictMap).catch(() => undefined),
+            ]);
           } else {
             setLifecycleMap({});
+            setConflictMap({});
           }
         })
         .catch((e) => setErr(String(e)))
@@ -233,7 +271,12 @@ export function WorkspacePage() {
               ) : (
                 <ul className="space-y-2">
                   {colItems.map((e) => (
-                    <BoardCard key={e.id} exec={e} lifecycle={lifecycleMap[e.id]} />
+                    <BoardCard
+                      key={e.id}
+                      exec={e}
+                      lifecycle={lifecycleMap[e.id]}
+                      conflict={conflictMap[e.id]}
+                    />
                   ))}
                 </ul>
               )}
@@ -254,7 +297,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function BoardCard({ exec, lifecycle }: { exec: AgentExecutionDto; lifecycle?: LifecycleSnapshotDto }) {
+function BoardCard({
+  exec,
+  lifecycle,
+  conflict,
+}: {
+  exec: AgentExecutionDto;
+  lifecycle?: LifecycleSnapshotDto;
+  conflict?: LifecycleConflictDto;
+}) {
   const dn = (exec.displayName ?? '').trim();
   const title = dn || exec.title || `Execution #${exec.id.split(':exec-')[1]}`;
   return (
@@ -263,6 +314,7 @@ function BoardCard({ exec, lifecycle }: { exec: AgentExecutionDto; lifecycle?: L
         to={`/executions/${encodeURIComponent(exec.id)}`}
         className={cn(
           'block rounded-md border bg-card p-2.5 text-xs shadow-sm transition-colors hover:border-foreground/30',
+          conflict?.isConflict ? 'border-rose-400/70 ring-1 ring-rose-300/30' :
           exec.manualStatus ? 'border-primary/40' : 'border-border',
         )}
       >
@@ -280,6 +332,11 @@ function BoardCard({ exec, lifecycle }: { exec: AgentExecutionDto; lifecycle?: L
           )}
           {lifecycle && (
             <LifecyclePill status={lifecycle.derivedStatus} confidence={lifecycle.confidence} />
+          )}
+          {conflict?.isConflict && (
+            <Badge tone="danger" className="text-[9px]" title={`conflict: ${conflict.label ?? 'manual vs derived'}`}>
+              ⚠ conflict
+            </Badge>
           )}
         </div>
 

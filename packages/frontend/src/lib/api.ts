@@ -393,6 +393,17 @@ export interface LifecycleSnapshotDto {
   computedAt: string;
 }
 
+/** v1.2: manual vs derived conflict. Read-only. */
+export interface LifecycleConflictDto {
+  executionId: string;
+  manualStatus: 'todo' | 'in-progress' | 'done' | 'blocked' | 'archived' | null;
+  derivedStatus: DerivedLifecycleStatus;
+  confidence: LifecycleConfidence;
+  reason: string;
+  isConflict: boolean;
+  label: string | null;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -517,6 +528,14 @@ export const api = {
     http<LifecycleSnapshotDto>(`/api/executions/${encodeURIComponent(id)}/lifecycle`),
   lifecycleBatch: (ids: string[]) =>
     http<Record<string, LifecycleSnapshotDto>>('/api/lifecycle/batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  // v1.2: Conflict detection
+  executionConflict: (id: string) =>
+    http<LifecycleConflictDto>(`/api/executions/${encodeURIComponent(id)}/conflict`),
+  conflictBatch: (ids: string[]) =>
+    http<Record<string, LifecycleConflictDto>>('/api/conflicts/batch', {
       method: 'POST',
       body: JSON.stringify({ ids }),
     }),

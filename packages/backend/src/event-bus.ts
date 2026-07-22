@@ -44,6 +44,18 @@ export type RealtimeEvent =
       lastActivity?: string;
       lastProject?: string;
       lastAction?: string;
+    }
+  | {
+      // v1.2: emitted when a cached LifecycleSnapshot's derivedStatus
+      // differs from the previous cached value. Slim payload — the
+      // frontend refetches the full snapshot via /api/executions/:id/lifecycle.
+      type: 'lifecycle_changed';
+      ts: string;
+      executionId: string;
+      derivedStatus: import('@agentos/shared').DerivedLifecycleStatus;
+      previousDerivedStatus: import('@agentos/shared').DerivedLifecycleStatus | null;
+      confidence: import('@agentos/shared').LifecycleConfidence;
+      reason: string;
     };
 
 export type RealtimeEventListener = (ev: RealtimeEvent) => void;
@@ -62,6 +74,14 @@ export class EventBus {
     // replay recent history so a late subscriber sees current state
     for (const ev of this.history) listener(ev);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Test helper: drop replay history so subsequent `subscribe()` calls
+   * don't see events emitted by earlier tests.
+   */
+  clearHistory(): void {
+    this.history = [];
   }
 
   emit(ev: RealtimeEvent): void {

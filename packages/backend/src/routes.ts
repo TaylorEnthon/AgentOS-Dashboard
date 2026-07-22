@@ -15,6 +15,12 @@ import {
   buildExecution,
   groupEventsIntoExecutions,
 } from './execution-service.js';
+import {
+  computeAndCacheLifecycle,
+  detectLifecycleConflict,
+  scopeEventsToExecution,
+  subscribeLifecycleInvalidation,
+} from './lifecycle-runtime.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -597,83 +603,48 @@ export function registerRoutes(
   /* ---------------- v1.1: Agent Lifecycle Intelligence ---------------- */
 
   // v1.1-a: read-only derived lifecycle snapshot for one execution.
-  // PURE: re-derives on every request from current activity_events +
-  // git commits. Never persists, never mutates, never schedules.
+  // v1.2: execution-scoped lifecycle snapshot. Filters activity_events
+  // down to the execution's window (30-min grouping rule) so multi-
+  // execution sessions don't bleed evidence across cards. Goes
+  // through the cache; emits a `lifecycle_changed` SSE event when
+  // the new derivedStatus differs from the cached one.
   app.get<{ Params: { id: string } }>('/api/executions/:id/lifecycle', async (req, reply) => {
     const lastColon = req.params.id.lastIndexOf(':exec-');
     if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
     const sessionId = req.params.id.slice(0, lastColon);
+    const indexStr = req.params.id.slice(lastColon + ':exec-'.length);
+    const execIndex = Number.parseInt(indexStr, 10);
+    if (!Number.isFinite(execIndex) || execIndex < 0) {
+      return reply.code(400).send({ error: 'malformed execution index' });
+    }
     const s = db.getSession(sessionId);
     if (!s) return reply.code(404).send({ error: 'session not found' });
 
-    // Re-use the same projection as the v0.8 detail route:
-    // pull events + commits within the execution's window. We don't
-    // need full event detail here — just timestamp + type — so we
-    // map to a slim TimelineItem subset the analyzer expects.
-    const events = db.listEventsForSession(s.id, 5000).map((r) => ({
-      id: r.id,
-      agentId: r.agent_id,
-      agentType: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
-      sessionId: r.session_id,
-      sessionTitle: null,
-      project: '',
-      projectDisplay: '',
-      timestamp: r.timestamp,
-      type: r.type as import('@agentos/shared').TimelineItem['type'],
-      action: '',
-      detail: r.detail,
-      meta: r.meta ? (JSON.parse(r.meta) as Record<string, unknown>) : null,
-    }));
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const scopedEvents = scopeEventsToExecution(events, execIndex);
+    const commits = await fetchSessionCommits(s);
 
-    // We need commits within the EXECUTION's window — not the
-    // session's. The execution window is group.start..group.end;
-    // the simplest correct approach is to recompute groups (the
-    // 30-min grouping rule is in execution-service) and pull commits
-    // for whichever group matches `:exec-${index}`. To keep this
-    // endpoint cheap we approximate using the full session window
-    // and let the analyzer filter — commits outside the execution
-    // window will simply not affect the snapshot's commit-recent check
-    // (we only look at "most recent commit").
-    let commits: import('@agentos/shared').GitCommitInfo[] = [];
-    if (s.project_display || s.project) {
-      try {
-        const { commitsInRange, findRepoRoot } = await import('./git-service.js');
-        const root = await findRepoRoot(s.project_display || s.project);
-        if (root) {
-          commits = await commitsInRange(
-            root,
-            s.start_time,
-            s.end_time ?? new Date().toISOString(),
-            50,
-          );
-        }
-      } catch {
-        // non-fatal: just no commits in snapshot
-      }
-    }
-
-    const { analyzeLifecycle } = await import('./lifecycle-analyzer.js');
-    return analyzeLifecycle(req.params.id, {
-      events,
+    const result = computeAndCacheLifecycle(req.params.id, {
+      events: scopedEvents,
       commits,
       startTime: s.start_time,
       endTime: s.end_time ?? null,
     });
+    return result.snapshot;
   });
 
-  // v1.1-b: batch lifecycle — used by Workspace Board to avoid N+1.
-  // Returns a map keyed by execution id. Unknown ids are silently
-  // omitted (the Board simply skips them).
+  // v1.2: batch lifecycle with execution-scoped events. Used by the
+  // Workspace Board. Same emit-on-change semantics as the single-
+  // execution endpoint — each execution whose status changed between
+  // the cached value and the new computation gets a `lifecycle_changed`
+  // SSE event.
   app.post<{ Body: { ids?: string[] } }>('/api/lifecycle/batch', async (req) => {
     const ids = Array.isArray(req.body?.ids) ? req.body!.ids.slice(0, 500) : [];
     const out: Record<string, import('@agentos/shared').LifecycleSnapshot> = {};
     if (ids.length === 0) return out;
 
-    const { analyzeLifecycle } = await import('./lifecycle-analyzer.js');
-
-    // Parse + bucket ids by sessionId so we can pull events once per
-    // session instead of N times.
-    type Bucket = { execIndex: number; sessionId: string };
+    // Parse + bucket by sessionId so we pull events once per session.
+    type Bucket = { execIndex: number; execId: string };
     const bySession = new Map<string, Bucket[]>();
     for (const id of ids) {
       const lastColon = id.lastIndexOf(':exec-');
@@ -683,63 +654,82 @@ export function registerRoutes(
       const execIndex = Number.parseInt(indexStr, 10);
       if (!Number.isFinite(execIndex) || execIndex < 0) continue;
       const arr = bySession.get(sessionId) ?? [];
-      arr.push({ execIndex, sessionId: id });
+      arr.push({ execIndex, execId: id });
       bySession.set(sessionId, arr);
     }
 
     for (const [sessionId, buckets] of bySession.entries()) {
       const s = db.getSession(sessionId);
       if (!s) continue;
+      const allEvents = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const commits = await fetchSessionCommits(s);
 
-      // Pull events + commits once for this session.
-      const events = db.listEventsForSession(s.id, 5000).map((r) => ({
-        id: r.id,
-        agentId: r.agent_id,
-        agentType: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
-        sessionId: r.session_id,
-        sessionTitle: null,
-        project: '',
-        projectDisplay: '',
-        timestamp: r.timestamp,
-        type: r.type as import('@agentos/shared').TimelineItem['type'],
-        action: '',
-        detail: r.detail,
-        meta: r.meta ? (JSON.parse(r.meta) as Record<string, unknown>) : null,
-      }));
-      let commits: import('@agentos/shared').GitCommitInfo[] = [];
-      if (s.project_display || s.project) {
-        try {
-          const { commitsInRange, findRepoRoot } = await import('./git-service.js');
-          const root = await findRepoRoot(s.project_display || s.project);
-          if (root) {
-            commits = await commitsInRange(
-              root,
-              s.start_time,
-              s.end_time ?? new Date().toISOString(),
-              50,
-            );
-          }
-        } catch {
-          // non-fatal
-        }
-      }
-      // Compute one snapshot per requested execIndex. Other events /
-      // commits outside that window are not filtered (the analyzer
-      // looks at lastEventAge, which works on a single execution's
-      // window only after grouping). To keep batch O(1) per session
-      // we approximate using the full session window — the analyzer
-      // is tolerant: it uses lastEventMs which is the most-recent
-      // event in the window, so multi-exec sessions may share
-      // recent-activity signals across executions. This is a known
-      // approximation documented in the endpoint description.
       for (const bucket of buckets) {
-        out[bucket.sessionId] = analyzeLifecycle(bucket.sessionId, {
-          events,
+        const scopedEvents = scopeEventsToExecution(allEvents, bucket.execIndex);
+        const result = computeAndCacheLifecycle(bucket.execId, {
+          events: scopedEvents,
           commits,
           startTime: s.start_time,
           endTime: s.end_time ?? null,
         });
+        out[bucket.execId] = result.snapshot;
       }
+    }
+    return out;
+  });
+
+  // v1.2-c: manual vs derived conflict detection. Read-only — never
+  // mutates manualStatus. Returns null when no conflict and the
+  // structured LifecycleConflict otherwise.
+  app.get<{ Params: { id: string } }>('/api/executions/:id/conflict', async (req, reply) => {
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    if (!db.getSession(sessionId)) return reply.code(404).send({ error: 'session not found' });
+
+    // Reuse the lifecycle endpoint logic by calling computeAndCache.
+    // (Cheap enough — the cache amortizes across requests.)
+    const indexStr = req.params.id.slice(lastColon + ':exec-'.length);
+    const execIndex = Number.parseInt(indexStr, 10);
+    const s = db.getSession(sessionId)!;
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const scopedEvents = scopeEventsToExecution(events, execIndex);
+    const commits = await fetchSessionCommits(s);
+    const { snapshot } = computeAndCacheLifecycle(req.params.id, {
+      events: scopedEvents,
+      commits,
+      startTime: s.start_time,
+      endTime: s.end_time ?? null,
+    });
+    const manual = db.getExecutionMetadata(req.params.id)?.manualStatus ?? null;
+    return detectLifecycleConflict(req.params.id, snapshot, manual);
+  });
+
+  // v1.2-d: batch conflict for Board — returns map of execId → conflict.
+  app.post<{ Body: { ids?: string[] } }>('/api/conflicts/batch', async (req) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body!.ids.slice(0, 500) : [];
+    const out: Record<string, import('@agentos/shared').LifecycleConflict> = {};
+    if (ids.length === 0) return out;
+    for (const id of ids) {
+      const lastColon = id.lastIndexOf(':exec-');
+      if (lastColon < 0) continue;
+      const sessionId = id.slice(0, lastColon);
+      const s = db.getSession(sessionId);
+      if (!s) continue;
+      const indexStr = id.slice(lastColon + ':exec-'.length);
+      const execIndex = Number.parseInt(indexStr, 10);
+      if (!Number.isFinite(execIndex) || execIndex < 0) continue;
+      const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const scopedEvents = scopeEventsToExecution(events, execIndex);
+      const commits = await fetchSessionCommits(s);
+      const { snapshot } = computeAndCacheLifecycle(id, {
+        events: scopedEvents,
+        commits,
+        startTime: s.start_time,
+        endTime: s.end_time ?? null,
+      });
+      const manual = db.getExecutionMetadata(id)?.manualStatus ?? null;
+      out[id] = detectLifecycleConflict(id, snapshot, manual);
     }
     return out;
   });
@@ -930,6 +920,35 @@ function rowToEventDto(r: import('./db.js').EventRow) {
  * execution projection). We don't join sessions here — caller supplies
  * project/display via the surrounding session.
  */
+/**
+ * v1.2: fetch commits within a session's time window. Used by all
+ * lifecycle routes. Failures are swallowed (we still return a valid
+ * snapshot, just without commit evidence).
+ */
+async function fetchSessionCommits(s: import('./db.js').SessionRow): Promise<import('@agentos/shared').GitCommitInfo[]> {
+  if (!s.project_display && !s.project) return [];
+  try {
+    const { commitsInRange, findRepoRoot } = await import('./git-service.js');
+    const root = await findRepoRoot(s.project_display || s.project);
+    if (!root) return [];
+    return await commitsInRange(
+      root,
+      s.start_time,
+      s.end_time ?? new Date().toISOString(),
+      50,
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * v1.2: subscribe the lifecycle cache to activity events so stale
+ * snapshots get invalidated when activity updates. Called once on
+ * route registration.
+ */
+subscribeLifecycleInvalidation();
+
 function rowToTimelineItem(r: import('./db.js').EventRow): import('@agentos/shared').TimelineItem {
   return {
     id: r.id,
