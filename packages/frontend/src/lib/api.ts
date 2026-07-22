@@ -355,6 +355,44 @@ export interface ExecutionStatusHistoryDto {
   createdAt: string;
 }
 
+/* ---------------- v1.1: Agent Lifecycle Intelligence ---------------- */
+
+export type DerivedLifecycleStatus =
+  | 'queued'
+  | 'running'
+  | 'idle'
+  | 'blocked'
+  | 'completed'
+  | 'failed';
+
+export type LifecycleConfidence = 'high' | 'medium' | 'low';
+
+export interface LifecycleIndicatorDto {
+  type:
+    | 'recent-activity'
+    | 'no-activity'
+    | 'commit-landed'
+    | 'failure-marker'
+    | 'session-ended'
+    | 'empty-data'
+    | 'contradiction'
+    | 'idle-threshold-crossed'
+    | 'blocked-threshold-crossed';
+  label: string;
+  weight: number;
+}
+
+export interface LifecycleSnapshotDto {
+  executionId: string;
+  derivedStatus: DerivedLifecycleStatus;
+  confidence: LifecycleConfidence;
+  reason: string;
+  lastActivityAt: string | null;
+  lastActivityAgeMs: number | null;
+  indicators: LifecycleIndicatorDto[];
+  computedAt: string;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -473,4 +511,13 @@ export const api = {
   // v1.0: Execution Board & Lifecycle
   executionHistory: (id: string) =>
     http<ExecutionStatusHistoryDto[]>(`/api/executions/${encodeURIComponent(id)}/history`),
+
+  // v1.1: Agent Lifecycle Intelligence
+  executionLifecycle: (id: string) =>
+    http<LifecycleSnapshotDto>(`/api/executions/${encodeURIComponent(id)}/lifecycle`),
+  lifecycleBatch: (ids: string[]) =>
+    http<Record<string, LifecycleSnapshotDto>>('/api/lifecycle/batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
 };

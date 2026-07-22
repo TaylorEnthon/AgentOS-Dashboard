@@ -104,6 +104,9 @@ export function ExecutionDetailPage() {
       {/* v1.0: Lifecycle Timeline — manual status changes (and future auto). */}
       <LifecycleTimeline executionId={data.id} />
 
+      {/* v1.1: derived lifecycle snapshot (read-only intelligence). */}
+      <LifecycleSnapshotCard executionId={data.id} />
+
       {/* Commits produced by this execution */}
       <Card>
         <CardHeader>
@@ -276,6 +279,92 @@ function StatusBadge({ status }: { status: EffectiveExecutionStatus }) {
       return <Badge tone="danger" className="text-[10px]">✕ blocked</Badge>;
     case 'archived':
       return <Badge tone="muted" className="text-[10px]">▣ archived</Badge>;
+  }
+}
+
+/* ---------------- v1.1: Lifecycle Snapshot ---------------- */
+
+function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
+  const [snap, setSnap] = useState<import('../lib/api').LifecycleSnapshotDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.executionLifecycle(executionId)
+      .then((s) => { if (!cancelled) { setSnap(s); setErr(null); } })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    load();
+    const t = setInterval(load, 30_000); // refresh every 30s for "running" freshness
+    return () => { cancelled = true; clearInterval(t); };
+  }, [executionId]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Lifecycle Intelligence</CardTitle>
+        <CardDescription>
+          Read-only snapshot derived from activity events, commits, and
+          timestamps. Updates automatically every 30 seconds. Manual
+          status (above) takes precedence over this view.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && !snap && (
+          <p className="text-sm text-muted-foreground">Analyzing…</p>
+        )}
+        {snap && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">Derived:</span>
+              <DerivedBadge status={snap.derivedStatus} />
+              <span className={cn(
+                'rounded-full px-2 py-0.5 text-[10px] font-medium uppercase',
+                snap.confidence === 'high'   ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' :
+                snap.confidence === 'medium' ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                             'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300',
+              )}>
+                {snap.confidence} confidence
+              </span>
+              {snap.lastActivityAt && (
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  last activity {formatRelative(snap.lastActivityAt)}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-foreground/90">{snap.reason}</p>
+            {snap.indicators.length > 0 && (
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                {snap.indicators.map((i, idx) => (
+                  <li key={idx} className="flex items-baseline gap-2">
+                    <span className="font-mono text-[10px] uppercase">{i.type}</span>
+                    <span className="text-foreground/80">— {i.label}</span>
+                    <span className="ml-auto text-[10px] tabular-nums">w {i.weight.toFixed(2)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DerivedBadge({ status }: { status: import('../lib/api').DerivedLifecycleStatus }) {
+  switch (status) {
+    case 'queued':
+      return <Badge tone="muted" className="text-[10px]">○ queued</Badge>;
+    case 'running':
+      return <Badge tone="success" className="text-[10px]">● running</Badge>;
+    case 'idle':
+      return <Badge tone="muted" className="text-[10px]">~ idle</Badge>;
+    case 'blocked':
+      return <Badge tone="warning" className="text-[10px]">✕ blocked</Badge>;
+    case 'completed':
+      return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
+    case 'failed':
+      return <Badge tone="danger" className="text-[10px]">! failed</Badge>;
   }
 }
 

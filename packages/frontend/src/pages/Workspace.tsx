@@ -21,7 +21,9 @@ import {
   api,
   type AgentExecutionDto,
   type AgentStatusDto,
+  type DerivedLifecycleStatus,
   type ExecutionBoardColumn,
+  type LifecycleSnapshotDto,
 } from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -61,6 +63,8 @@ export function WorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<AgentExecutionDto[]>([]);
   const [agents, setAgents] = useState<AgentStatusDto[]>([]);
+  /** v1.1: derived lifecycle snapshots keyed by execution id. */
+  const [lifecycleMap, setLifecycleMap] = useState<Record<string, LifecycleSnapshotDto>>({});
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -91,6 +95,15 @@ export function WorkspacePage() {
           setItems(rows);
           setAgents(ag);
           setErr(null);
+          // v1.1: fetch derived lifecycle snapshots in one batch call
+          // so each card can show its derived state alongside manual.
+          if (rows.length > 0) {
+            api.lifecycleBatch(rows.map((r) => r.id))
+              .then(setLifecycleMap)
+              .catch(() => undefined);
+          } else {
+            setLifecycleMap({});
+          }
         })
         .catch((e) => setErr(String(e)))
         .finally(() => { if (!silent) setRefreshing(false); });
@@ -220,7 +233,7 @@ export function WorkspacePage() {
               ) : (
                 <ul className="space-y-2">
                   {colItems.map((e) => (
-                    <BoardCard key={e.id} exec={e} />
+                    <BoardCard key={e.id} exec={e} lifecycle={lifecycleMap[e.id]} />
                   ))}
                 </ul>
               )}
@@ -241,7 +254,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function BoardCard({ exec }: { exec: AgentExecutionDto }) {
+function BoardCard({ exec, lifecycle }: { exec: AgentExecutionDto; lifecycle?: LifecycleSnapshotDto }) {
   const dn = (exec.displayName ?? '').trim();
   const title = dn || exec.title || `Execution #${exec.id.split(':exec-')[1]}`;
   return (
@@ -264,6 +277,9 @@ function BoardCard({ exec }: { exec: AgentExecutionDto }) {
           <Badge className={cn('text-[9px]', agentColor(exec.agentType))}>{exec.agentType}</Badge>
           {exec.manualStatus && (
             <Badge tone="info" className="text-[9px]" title="user-set">manual</Badge>
+          )}
+          {lifecycle && (
+            <LifecyclePill status={lifecycle.derivedStatus} confidence={lifecycle.confidence} />
           )}
         </div>
 
@@ -294,5 +310,36 @@ function BoardCard({ exec }: { exec: AgentExecutionDto }) {
         )}
       </Link>
     </li>
+  );
+}
+
+/**
+ * v1.1: small derived-lifecycle pill. Visually subdued so it never
+ * competes with the (board-column-determining) effectiveStatus badge
+ * shown elsewhere — this is the "Auto" hint, not the source of truth.
+ */
+function LifecyclePill({
+  status,
+  confidence,
+}: {
+  status: DerivedLifecycleStatus;
+  confidence: 'high' | 'medium' | 'low';
+}) {
+  const label = status === 'queued' ? 'queued' :
+    status === 'running' ? 'running' :
+    status === 'idle' ? 'idle' :
+    status === 'blocked' ? 'blocked' :
+    status === 'completed' ? 'completed' :
+    'failed';
+  const tone =
+    status === 'running'   ? 'success' :
+    status === 'completed' ? 'success' :
+    status === 'failed'    ? 'danger' :
+    status === 'blocked'   ? 'warning' :
+    'muted';
+  return (
+    <Badge tone={tone} className="text-[9px]" title={`derived (${confidence}) — see detail for reason`}>
+      {label}
+    </Badge>
   );
 }

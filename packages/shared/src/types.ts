@@ -516,6 +516,84 @@ export interface ExecutionBoardItem {
   boardColumn: ExecutionBoardColumn;
 }
 
+/* ---------------- v1.1: Agent Lifecycle Intelligence Foundation ---------------- */
+
+/**
+ * Six-state lifecycle vocabulary. Decoupled from `ExecutionStatus`
+ * (3-state: running / completed / unknown) so the analyzer can express
+ * a richer picture without breaking the v0.8 contract. Every value
+ * can be mapped to the older 3-state set:
+ *   - queued / running        -> running
+ *   - idle                     -> unknown
+ *   - blocked                  -> unknown
+ *   - completed                -> completed
+ *   - failed                   -> unknown
+ */
+export type DerivedLifecycleStatus =
+  | 'queued'
+  | 'running'
+  | 'idle'
+  | 'blocked'
+  | 'completed'
+  | 'failed';
+
+/**
+ * How confident the analyzer is in its derived status.
+ *  - `high`   multiple strong indicators agree
+ *  - `medium` one strong + one weak indicator, OR activity near a threshold
+ *  - `low`    insufficient / contradictory evidence (e.g. zero events)
+ */
+export type LifecycleConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * One piece of evidence the analyzer used to decide the status.
+ * Examples:
+ *  - { type: 'recent-activity', label: 'Last event 12s ago', weight: 1 }
+ *  - { type: 'commit-landed',   label: '1 commit in window', weight: 0.8 }
+ *  - { type: 'failure-marker',  label: 'session-failed event', weight: 1 }
+ *
+ * Weights are advisory — they're for the UI to render a
+ * "why do you think this?" tooltip, not for math.
+ */
+export interface LifecycleIndicator {
+  /** Stable enum-style code so the UI can match colors / icons. */
+  type:
+    | 'recent-activity'
+    | 'no-activity'
+    | 'commit-landed'
+    | 'failure-marker'
+    | 'session-ended'
+    | 'empty-data'
+    | 'contradiction'
+    | 'idle-threshold-crossed'
+    | 'blocked-threshold-crossed';
+  /** Human-readable line. */
+  label: string;
+  /** 0..1 advisory weight. */
+  weight: number;
+}
+
+/**
+ * Read-only snapshot of an Execution's derived lifecycle.
+ * Returned by `GET /api/executions/:id/lifecycle`. NOT stored —
+ * computed on demand by `lifecycle-analyzer.ts`.
+ */
+export interface LifecycleSnapshot {
+  executionId: string;
+  derivedStatus: DerivedLifecycleStatus;
+  confidence: LifecycleConfidence;
+  /** One-line explanation suitable for a tooltip or "why?" line. */
+  reason: string;
+  /** ISO timestamp of the most recent evidence (event / commit). */
+  lastActivityAt: string | null;
+  /** Age in ms since `lastActivityAt`. `null` when no activity at all. */
+  lastActivityAgeMs: number | null;
+  /** Evidence trail — see LifecycleIndicator. */
+  indicators: LifecycleIndicator[];
+  /** When the snapshot was computed (server time). */
+  computedAt: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;
