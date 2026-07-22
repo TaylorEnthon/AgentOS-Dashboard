@@ -35,7 +35,15 @@ export abstract class StubCollector extends BaseCollector {
   async scan(): Promise<RawScanResult> {
     // v0.1: stub collectors emit no data; they only expose their existence
     // so the UI can show "installed but not yet parsed".
-    return { agentId: this.type, sessions: [], usage: [], events: [], projects: [] };
+    return {
+      agentId: this.type,
+      collectedAt: new Date().toISOString(),
+      sessions: [],
+      usage: [],
+      events: [],
+      projects: [],
+      files: [],
+    };
   }
 }
 

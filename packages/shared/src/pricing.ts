@@ -2,9 +2,14 @@
  * Built-in model price table (USD per 1M tokens).
  * Users can override any model via settings.
  *
- * Sources are public list prices as of 2025; intentionally conservative —
- * real billing may differ (especially cached tokens). v0.1 is best-effort.
+ * v0.2: every cost now carries a {@link ConfidenceLevel}.
+ *   - `exact`:    resolved via override OR DEFAULT_PRICING exact match
+ *   - `estimated`: resolved via longest-prefix match (acceptable heuristic)
+ *   - `unknown`:  no entry matched → cost is computed against the safe $1/$1
+ *                 fallback and the caller is told it's not real.
  */
+
+import type { ConfidenceLevel } from './types.js';
 
 export interface ModelPricing {
   inputPerMTok: number;
@@ -50,32 +55,53 @@ export const DEFAULT_PRICING: Record<string, ModelPricing> = {
 };
 
 /**
+ * Result of cost resolution. `confidence` tells the caller whether the
+ * number is real or just a safe-but-uninformative fallback.
+ */
+export interface PricingResolution {
+  pricing: ModelPricing;
+  confidence: ConfidenceLevel;
+  /** The key that actually matched (override > exact > prefix > fallback). */
+  matchedKey: string;
+}
+
+export const SAFE_FALLBACK_PRICING: ModelPricing = { inputPerMTok: 1, outputPerMTok: 1 };
+
+/**
  * Find the best pricing entry for an arbitrary model string.
- * Tries:
- *   1. exact match
- *   2. longest prefix match (e.g. "claude-3-5-sonnet-20241022" -> "claude-3-5-sonnet")
- *   3. fallback 1/1 USD per MTok
+ * Resolution order (each step lowers confidence):
+ *   1. exact override     → exact
+ *   2. exact DEFAULT      → exact
+ *   3. longest prefix     → estimated
+ *   4. nothing matched    → unknown (uses SAFE_FALLBACK_PRICING)
  */
 export function resolvePricing(
   model: string | undefined,
   overrides: Record<string, ModelPricing> = {},
-): ModelPricing {
-  if (!model) return { inputPerMTok: 1, outputPerMTok: 1 };
+): PricingResolution {
+  if (!model) {
+    return { pricing: SAFE_FALLBACK_PRICING, confidence: 'unknown', matchedKey: '' };
+  }
   const lower = model.toLowerCase();
 
-  if (overrides[lower]) return overrides[lower];
-  if (DEFAULT_PRICING[lower]) return DEFAULT_PRICING[lower];
+  if (overrides[lower]) return { pricing: overrides[lower], confidence: 'exact', matchedKey: lower };
+  if (DEFAULT_PRICING[lower]) return { pricing: DEFAULT_PRICING[lower], confidence: 'exact', matchedKey: lower };
 
   // longest-prefix match
-  const candidates = Object.keys({ ...DEFAULT_PRICING, ...overrides })
+  const allKeys = Object.keys({ ...DEFAULT_PRICING, ...overrides });
+  const candidates = allKeys
     .filter((k) => lower.startsWith(k))
     .sort((a, b) => b.length - a.length);
   if (candidates.length > 0) {
     const key = candidates[0];
-    return overrides[key] ?? DEFAULT_PRICING[key];
+    return {
+      pricing: overrides[key] ?? DEFAULT_PRICING[key],
+      confidence: 'estimated',
+      matchedKey: key,
+    };
   }
 
-  return { inputPerMTok: 1, outputPerMTok: 1 };
+  return { pricing: SAFE_FALLBACK_PRICING, confidence: 'unknown', matchedKey: '' };
 }
 
 export interface CostBreakdown {
@@ -83,8 +109,13 @@ export interface CostBreakdown {
   outputCost: number;
   cacheCost: number;
   total: number;
+  costConfidence: ConfidenceLevel;
 }
 
+/**
+ * Compute cost and stamp confidence. Callers (collectors) should attach
+ * `costConfidence` and `unknownModel` to the resulting UsageRecord.
+ */
 export function computeCost(
   model: string | undefined,
   inputTokens: number,
@@ -93,7 +124,8 @@ export function computeCost(
   cacheWriteTokens = 0,
   overrides: Record<string, ModelPricing> = {},
 ): CostBreakdown {
-  const p = resolvePricing(model, overrides);
+  const res = resolvePricing(model, overrides);
+  const p = res.pricing;
   const inputCost = (inputTokens / 1_000_000) * p.inputPerMTok;
   const outputCost = (outputTokens / 1_000_000) * p.outputPerMTok;
   const cacheReadRate = p.cacheReadPerMTok ?? p.inputPerMTok * 0.1;
@@ -106,5 +138,21 @@ export function computeCost(
     outputCost,
     cacheCost,
     total: inputCost + outputCost + cacheCost,
+    costConfidence: res.confidence,
   };
+}
+
+/**
+ * Cheap token-confidence heuristic. `exact` if every present token counter
+ * was parsed out of a structured field; `unknown` if the agent gave us
+ * nothing; `estimated` if we had to fall back to a derived rule.
+ */
+export function deriveUsageConfidence(
+  inputTokens: number,
+  outputTokens: number,
+  hadStructuredUsageField: boolean,
+): ConfidenceLevel {
+  if (!hadStructuredUsageField) return 'unknown';
+  if (inputTokens === 0 && outputTokens === 0) return 'unknown';
+  return 'exact';
 }

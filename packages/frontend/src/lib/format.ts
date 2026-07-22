@@ -61,6 +61,23 @@ export function statusColor(status: string): string {
   }
 }
 
+/**
+ * Visual indicator for token / cost confidence. Use `≈` prefix for
+ * non-exact numbers; use a tone badge when you want a quick visual scan.
+ */
+export function confidenceTone(c: 'exact' | 'estimated' | 'unknown' | undefined): 'success' | 'warning' | 'danger' | 'muted' {
+  switch (c) {
+    case 'exact': return 'success';
+    case 'estimated': return 'warning';
+    case 'unknown': return 'danger';
+    default: return 'muted';
+  }
+}
+
+export function confidenceLabel(c: 'exact' | 'estimated' | 'unknown' | undefined): string {
+  return c ?? 'unknown';
+}
+
 export function agentColor(type: string): string {
   switch (type) {
     case 'claude-code': return 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200';

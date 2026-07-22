@@ -2,14 +2,30 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import {
   BaseCollector,
+  buildFingerprint,
+  buildSourceMeta,
   forEachJsonl,
+  hashFile,
   homeDir,
+  isFileUnchanged,
   listFilesByExt,
   makeSessionId,
   normalizeTimestamp,
   type ScanOptions,
 } from './base.js';
-import { computeCost, type ModelPricing, type AgentType, type RawScanResult, type AgentSession, type UsageRecord, type ActivityEvent } from '@agentos/shared';
+import {
+  computeCost,
+  deriveUsageConfidence,
+  worseConfidence,
+  type ModelPricing,
+  type AgentType,
+  type RawScanResult,
+  type AgentSession,
+  type UsageRecord,
+  type ActivityEvent,
+  type ConfidenceLevel,
+  type FileFingerprint,
+} from '@agentos/shared';
 
 interface GrokPromptHistoryRecord {
   timestamp?: string;
@@ -28,10 +44,6 @@ interface GrokPromptHistoryRecord {
   tool_call?: { name?: string };
 }
 
-/**
- * Decode Grok's percent-encoded project folder names.
- * "D%3A%5Cproject%5CMY%5CAgentOS%20Dashboard" -> "D:\project\MY\AgentOS Dashboard"
- */
 export function decodeGrokProjectDir(name: string): string {
   try {
     return decodeURIComponent(name);
@@ -66,17 +78,22 @@ export class GrokCollector extends BaseCollector {
     }
   }
 
-  async scan(agent: { id: string; type: AgentType; dataDir: string }, opts: ScanOptions = {}): Promise<RawScanResult> {
+  async scan(
+    agent: { id: string; type: AgentType; dataDir: string },
+    opts: ScanOptions = {},
+  ): Promise<RawScanResult> {
     const pricing = opts.pricing ?? {};
+    const collectedAt = new Date().toISOString();
     const sessionsDir = path.join(agent.dataDir, 'sessions');
     if (!(await this.isDir(sessionsDir))) {
-      return { agentId: agent.id, sessions: [], usage: [], events: [], projects: [] };
+      return { agentId: agent.id, collectedAt, sessions: [], usage: [], events: [], projects: [], files: [] };
     }
 
     const sessions: AgentSession[] = [];
     const usage: UsageRecord[] = [];
     const events: ActivityEvent[] = [];
     const projectsMap = new Map<string, { path: string; displayName: string; lastSeen: string }>();
+    const files: FileFingerprint[] = [];
 
     const projectDirs = (await fs.readdir(sessionsDir, { withFileTypes: true }))
       .filter((e) => e.isDirectory())
@@ -91,11 +108,29 @@ export class GrokCollector extends BaseCollector {
       const projectDisplay = decodeGrokProjectDir(projectName);
       const projectKey = projectDisplay;
 
-      const files = await listFilesByExt(projDir, ['jsonl', 'ndjson'], { max: maxFiles - fileCount });
-      for (const file of files) {
+      const found = await listFilesByExt(projDir, ['jsonl', 'ndjson'], { max: maxFiles - fileCount });
+      for (const file of found) {
         if (fileCount >= maxFiles) break;
         fileCount++;
-        await this.parseSessionFile(file, projectKey, projectDisplay, agent.id, sessions, usage, events, pricing);
+
+        const fp = await hashFile(file);
+        const prior = opts.priorFiles?.get(file);
+        if (opts.mode === 'incremental' && isFileUnchanged(fp, prior)) continue;
+
+        const before = {
+          sessions: sessions.length,
+          usage: usage.length,
+          events: events.length,
+        };
+        await this.parseSessionFile(
+          file, projectKey, projectDisplay, agent.id, collectedAt,
+          sessions, usage, events, pricing,
+        );
+        files.push(buildFingerprint(file, fp, {
+          sessions: sessions.length - before.sessions,
+          usageRecords: usage.length - before.usage,
+          events: events.length - before.events,
+        }));
       }
 
       if (sessions.some((s) => s.project === projectKey)) {
@@ -112,10 +147,12 @@ export class GrokCollector extends BaseCollector {
 
     return {
       agentId: agent.id,
+      collectedAt,
       sessions,
       usage,
       events,
       projects: Array.from(projectsMap.values()),
+      files,
     };
   }
 
@@ -124,6 +161,7 @@ export class GrokCollector extends BaseCollector {
     projectKey: string,
     projectDisplay: string,
     agentId: string,
+    collectedAt: string,
     sessions: AgentSession[],
     usage: UsageRecord[],
     events: ActivityEvent[],
@@ -140,8 +178,9 @@ export class GrokCollector extends BaseCollector {
     let cacheWrite = 0;
     let fileOps = 0;
     let toolCalls = 0;
+    let worstUsageConf: ConfidenceLevel = 'exact';
+    let worstCostConf: ConfidenceLevel = 'exact';
 
-    // Extract session id from folder name (parent of prompt_history.jsonl)
     const parent = path.basename(path.dirname(file));
     if (parent) externalId = parent;
 
@@ -154,15 +193,19 @@ export class GrokCollector extends BaseCollector {
       if (rec.session_id && !externalId) externalId = rec.session_id;
       if (rec.model) lastModel = rec.model;
 
+      // Note: Grok prompt_history has one record per turn, so collisions
+      // here are unlikely — but use the record's own array index if any.
       if (rec.role === 'user' || rec.role === 'assistant' || rec.type === 'message') {
         messageCount++;
+        const evId = `${agentId}:${externalId}:${_line}:msg`;
         events.push({
-          id: `${agentId}:${externalId}:${_line}:msg`,
+          id: evId,
           sessionId: makeSessionId(agentId, externalId),
           agentId,
           type: 'message',
           timestamp: ts ?? new Date().toISOString(),
           detail: typeof rec.content === 'string' ? rec.content.slice(0, 200) : undefined,
+          source: buildSourceMeta('grok', file, evId, collectedAt),
         });
       }
 
@@ -170,13 +213,15 @@ export class GrokCollector extends BaseCollector {
         toolCalls++;
         const name = rec.tool_call.name ?? 'unknown';
         if (/file|read|write|edit/i.test(name)) fileOps++;
+        const evId = `${agentId}:${externalId}:${_line}:tc`;
         events.push({
-          id: `${agentId}:${externalId}:${_line}:tc`,
+          id: evId,
           sessionId: makeSessionId(agentId, externalId),
           agentId,
           type: 'tool-call',
           timestamp: ts ?? new Date().toISOString(),
           detail: name,
+          source: buildSourceMeta('grok', file, evId, collectedAt),
         });
       }
 
@@ -190,9 +235,12 @@ export class GrokCollector extends BaseCollector {
         outputTokens += ot;
         cacheRead += cr;
         cacheWrite += cw;
-        const cost = computeCost(rec.model, it, ot, cr, cw, pricing);
+        const breakdown = computeCost(rec.model, it, ot, cr, cw, pricing);
+        worstUsageConf = worseConfidence(worstUsageConf, deriveUsageConfidence(it, ot, true));
+        worstCostConf = worseConfidence(worstCostConf, breakdown.costConfidence);
+        const usageId = `${agentId}:${externalId}:${_line}:u`;
         usage.push({
-          id: `${agentId}:${externalId}:${_line}:u`,
+          id: usageId,
           sessionId: makeSessionId(agentId, externalId),
           agentId,
           model: rec.model ?? 'unknown',
@@ -201,17 +249,26 @@ export class GrokCollector extends BaseCollector {
           cacheReadTokens: cr,
           cacheWriteTokens: cw,
           totalTokens: it + ot + cr + cw,
-          estimatedCost: cost.total,
+          estimatedCost: breakdown.total,
           timestamp: ts ?? new Date().toISOString(),
+          usageConfidence: deriveUsageConfidence(it, ot, true),
+          costConfidence: breakdown.costConfidence,
+          unknownModel: breakdown.costConfidence === 'unknown',
+          source: buildSourceMeta('grok', file, usageId, collectedAt),
         });
+      } else {
+        // line with role but no usage block → tokens for this turn are unknown
+        if (rec.role === 'assistant') worstUsageConf = worseConfidence(worstUsageConf, 'unknown');
       }
     });
 
     if (!externalId || !sessionStart) return;
-    const totalCost = computeCost(lastModel, inputTokens, outputTokens, cacheRead, cacheWrite, pricing).total;
+    const totalBreakdown = computeCost(lastModel, inputTokens, outputTokens, cacheRead, cacheWrite, pricing);
+    worstCostConf = worseConfidence(worstCostConf, totalBreakdown.costConfidence);
 
+    const sessionId = makeSessionId(agentId, externalId);
     sessions.push({
-      id: makeSessionId(agentId, externalId),
+      id: sessionId,
       agentId,
       agentType: this.type,
       externalId,
@@ -226,9 +283,12 @@ export class GrokCollector extends BaseCollector {
       totalInputTokens: inputTokens,
       totalOutputTokens: outputTokens,
       totalTokens: inputTokens + outputTokens + cacheRead + cacheWrite,
-      estimatedCost: totalCost,
+      estimatedCost: totalBreakdown.total,
       fileOps,
       toolCalls,
+      usageConfidence: worstUsageConf,
+      costConfidence: worstCostConf,
+      source: buildSourceMeta('grok', file, sessionId, collectedAt),
     });
   }
 }

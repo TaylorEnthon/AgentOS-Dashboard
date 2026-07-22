@@ -2,6 +2,10 @@
  * Unified Agent data model — shared across collectors, backend, and frontend.
  * All collectors MUST normalize into these shapes; the backend persists them
  * verbatim and the frontend renders them.
+ *
+ * v0.2 additions (additive, backward compatible):
+ *  - SourceMeta on every persisted record → full data provenance.
+ *  - ConfidenceLevel on usage / cost → users can tell exact vs estimated.
  */
 
 export type AgentType =
@@ -20,6 +24,34 @@ export const ALL_AGENT_TYPES: AgentType[] = [
   'hermes',
   'custom',
 ];
+
+/**
+ * Confidence in a token / cost number.
+ *  - `exact`:    read directly from the agent's structured usage field
+ *  - `estimated`: derived from partial data (e.g. missing cache split,
+ *                 token count inferred from char count)
+ *  - `unknown`:  no reliable source (e.g. model unrecognized, tokens zero)
+ */
+export type ConfidenceLevel = 'exact' | 'estimated' | 'unknown';
+
+/**
+ * Where a record came from. Attached to every persisted row so the UI
+ * (and future trust reports) can trace any number back to its source file.
+ */
+export interface SourceMeta {
+  /** Absolute path of the source file (e.g. ~/.claude/projects/x/s.jsonl). */
+  sourceFile: string;
+  /** Provider = agent type. Always set; intentionally narrower than a freeform string. */
+  sourceProvider: AgentType;
+  /**
+   * Stable per-record id used for dedup. Sessions: `${provider}:${externalId}`.
+   * Usage / events: `${provider}:${externalId}:${lineKey}`.
+   * MUST match the persisted `id` (or its primary key prefix) for INSERT OR IGNORE.
+   */
+  sourceId: string;
+  /** ISO timestamp of when this record was collected (batch time, not per-event). */
+  collectedAt: string;
+}
 
 export interface Agent {
   id: string;
@@ -55,6 +87,12 @@ export interface AgentSession {
   estimatedCost: number;
   fileOps: number;
   toolCalls: number;
+  /** Aggregate confidence across the session's usage records. */
+  usageConfidence?: ConfidenceLevel;
+  /** Aggregate confidence across the session's cost calculations. */
+  costConfidence?: ConfidenceLevel;
+  /** Provenance — set by collectors, persisted verbatim. */
+  source?: SourceMeta;
 }
 
 export interface UsageRecord {
@@ -69,6 +107,13 @@ export interface UsageRecord {
   totalTokens: number;
   estimatedCost: number;
   timestamp: string;
+  /** Per-record confidence in the token counts. */
+  usageConfidence: ConfidenceLevel;
+  /** Per-record confidence in the cost number (model resolution + cache pricing). */
+  costConfidence: ConfidenceLevel;
+  /** True iff the model string didn't resolve to any pricing entry. */
+  unknownModel: boolean;
+  source?: SourceMeta;
 }
 
 export type ActivityEventType =
@@ -91,6 +136,7 @@ export interface ActivityEvent {
   timestamp: string;
   detail?: string;
   meta?: Record<string, unknown>;
+  source?: SourceMeta;
 }
 
 export interface Project {
@@ -109,10 +155,27 @@ export interface Project {
  */
 export interface RawScanResult {
   agentId: string;
+  collectedAt: string;
   sessions: AgentSession[];
   usage: UsageRecord[];
   events: ActivityEvent[];
   projects: Array<{ path: string; displayName: string; lastSeen: string }>;
+  /**
+   * Per-file provenance + fingerprint, so the ingest layer can update
+   * `ingestion_files` for future incremental scans.
+   */
+  files: Array<FileFingerprint>;
+}
+
+export interface FileFingerprint {
+  sourceFile: string;
+  size: number;
+  mtimeMs: number;
+  /** SHA-256 of the file contents (or first chunk for very large files). */
+  contentHash: string;
+  sessions: number;
+  usageRecords: number;
+  events: number;
 }
 
 export interface OverviewStats {
@@ -140,4 +203,38 @@ export interface OverviewStats {
     cost: number;
     sessions: number;
   }>;
+}
+
+/**
+ * Trust & provenance summary returned by `/api/data-health`.
+ */
+export interface DataHealth {
+  totalSessions: number;
+  totalUsageRecords: number;
+  totalEvents: number;
+  /** usage confidence breakdown across all persisted usage rows. */
+  usage: { exact: number; estimated: number; unknown: number };
+  /** cost confidence breakdown across all persisted usage rows. */
+  cost: { exact: number; estimated: number; unknown: number };
+  /** usage rows that were ignored on the most recent scan because the id already existed. */
+  duplicatesPrevented: number;
+  /** agents whose last_scanned_at is most recent. */
+  lastScanAt?: string;
+  ingestionFiles: number;
+  ingestionFileSize: number;
+  /** Per-agent last-scan summary. */
+  perAgent: Array<{
+    agentId: string;
+    lastScanAt?: string;
+    files: number;
+    sessions: number;
+    usage: number;
+    duplicates: number;
+  }>;
+}
+
+/** Pick the worse of two confidence levels. */
+export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
+  const rank = { exact: 0, estimated: 1, unknown: 2 } as const;
+  return rank[a] >= rank[b] ? a : b;
 }

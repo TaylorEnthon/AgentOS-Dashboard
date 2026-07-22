@@ -20,6 +20,19 @@ export function formatUSD(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
+/**
+ * Format a cost value with a confidence-aware prefix. Use `≈` when the
+ * cost is not `exact` so users don't mistake an estimate for a bill.
+ * When confidence is `undefined` (legacy data), be conservative and show `≈`.
+ */
+export function formatCost(
+  amount: number,
+  confidence: 'exact' | 'estimated' | 'unknown' | undefined,
+): string {
+  const prefix = confidence === 'exact' ? '' : '≈ ';
+  return `${prefix}${formatUSD(amount)}`;
+}
+
 export function formatRelative(iso: string | undefined): string {
   if (!iso) return '—';
   const t = Date.parse(iso);

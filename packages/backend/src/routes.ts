@@ -1,14 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import { Db } from './db.js';
 import { Scheduler } from './scheduler.js';
-import { DEFAULT_PRICING, type ModelPricing } from '@agentos/shared';
+import { DEFAULT_PRICING } from '@agentos/shared';
 import type { SettingsStore } from './settings.js';
+import type { ConfidenceLevel } from '@agentos/shared';
 
 export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Scheduler, settings: SettingsStore): void {
   app.get('/api/health', async () => ({
     ok: true,
     ts: new Date().toISOString(),
-    version: '0.1.0',
+    version: '0.2.0',
   }));
 
   app.get('/api/overview', async () => {
@@ -98,44 +99,48 @@ export function registerRoutes(app: FastifyInstance, db: Db, scheduler: Schedule
 
   app.get('/api/projects', async () => db.listProjects());
 
-  app.post('/api/refresh', async () => {
-    const reports = await scheduler.scanAll();
-    return { ok: true, ts: new Date().toISOString(), reports };
+  app.post<{ Body: { forceFull?: boolean } }>('/api/refresh', async (req) => {
+    const forceFull = req.body?.forceFull === true;
+    const reports = await scheduler.scanAll({ forceFull });
+    return { ok: true, ts: new Date().toISOString(), mode: forceFull ? 'full' : 'auto', reports };
   });
+
+  /* ---------- v0.2 endpoints ---------- */
+
+  app.get('/api/data-health', async () => db.dataHealth());
+
+  app.get<{ Querystring: { provider?: string } }>('/api/ingestion-files', async (req, reply) => {
+    const provider = req.query.provider as import('@agentos/shared').AgentType | undefined;
+    if (provider && !['claude-code', 'codex', 'grok', 'gemini', 'hermes', 'custom'].includes(provider)) {
+      return reply.code(400).send({ error: 'invalid provider' });
+    }
+    return db.listIngestionFiles(provider);
+  });
+
+  /* ---------- settings ---------- */
 
   app.get('/api/settings', async () => {
     const s = await settings.load();
-    return {
-      ...s,
-      defaultPricing: DEFAULT_PRICING,
-    };
+    return { ...s, defaultPricing: DEFAULT_PRICING };
   });
 
   app.put<{ Body: Record<string, unknown> }>('/api/settings', async (req) => {
     const partial = req.body ?? {};
     const next = await settings.update(partial as Record<string, never>);
-    // persist interesting keys to DB so scheduler can pick them up
     if (typeof partial.pollIntervalSec === 'number') {
       db.setSetting('pollIntervalSec', JSON.stringify(partial.pollIntervalSec));
     }
-    if (partial.pricingOverrides) {
-      db.setSetting('pricingOverrides', JSON.stringify(partial.pricingOverrides));
-    }
-    if (partial.dataDirOverrides) {
-      db.setSetting('dataDirOverrides', JSON.stringify(partial.dataDirOverrides));
-    }
-    if (partial.enabledAgents) {
-      db.setSetting('enabledAgents', JSON.stringify(partial.enabledAgents));
-    }
+    if (partial.pricingOverrides) db.setSetting('pricingOverrides', JSON.stringify(partial.pricingOverrides));
+    if (partial.dataDirOverrides) db.setSetting('dataDirOverrides', JSON.stringify(partial.dataDirOverrides));
+    if (partial.enabledAgents) db.setSetting('enabledAgents', JSON.stringify(partial.enabledAgents));
     settings.setLivePricingOverrides(next.pricingOverrides);
     return next;
   });
 
-  app.get('/api/pricing', async () => ({
-    defaults: DEFAULT_PRICING,
-    overrides: (await settings.load()).pricingOverrides,
-    effective: { ...DEFAULT_PRICING, ...(await settings.load()).pricingOverrides },
-  }));
+  app.get('/api/pricing', async () => {
+    const s = await settings.load();
+    return { defaults: DEFAULT_PRICING, overrides: s.pricingOverrides, effective: { ...DEFAULT_PRICING, ...s.pricingOverrides } };
+  });
 }
 
 function rowToSessionDto(r: import('./db.js').SessionRow) {
@@ -158,6 +163,14 @@ function rowToSessionDto(r: import('./db.js').SessionRow) {
     estimatedCost: r.estimated_cost,
     fileOps: r.file_ops,
     toolCalls: r.tool_calls,
+    usageConfidence: r.usage_confidence ?? undefined,
+    costConfidence: r.cost_confidence ?? undefined,
+    source: r.source_file ? {
+      sourceFile: r.source_file,
+      sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+      sourceId: r.source_id ?? r.id,
+      collectedAt: r.collected_at ?? '',
+    } : undefined,
   };
 }
 
@@ -170,6 +183,12 @@ function rowToEventDto(r: import('./db.js').EventRow) {
     timestamp: r.timestamp,
     detail: r.detail,
     meta: r.meta ? JSON.parse(r.meta) : undefined,
+    source: r.source_file ? {
+      sourceFile: r.source_file,
+      sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+      sourceId: r.source_id ?? r.id,
+      collectedAt: r.collected_at ?? '',
+    } : undefined,
   };
 }
 
@@ -197,3 +216,6 @@ function fillDailyGaps(rows: Array<{ date: string; tokens: number; cost: number;
   }
   return out;
 }
+
+// Re-export for type completeness
+export type { ConfidenceLevel };

@@ -1,38 +1,32 @@
-import { promises as fs } from 'node:fs';
+import { promises as fs, createReadStream } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 import type {
   Agent,
   AgentType,
   RawScanResult,
+  SourceMeta,
+  FileFingerprint,
 } from '@agentos/shared';
 
 /**
  * Abstract base for every collector.
  *
- * Subclasses are responsible for:
- *  - detecting the agent's data dir
- *  - scanning it into a {@link RawScanResult}
- *
- * Cross-cutting concerns (DB upsert, retries, scheduling) live in the backend.
+ * v0.2 changes:
+ *  - scan() now returns `RawScanResult` with `collectedAt` + `files[]`
+ *    (full provenance & per-file fingerprints).
+ *  - ScanOptions supports `mode: 'full' | 'incremental'` and `since`.
+ *    `incremental` is best-effort: if no prior fingerprint exists for a
+ *    file, the file is read (a future chokidar watcher will narrow this).
  */
 export abstract class BaseCollector {
   abstract readonly type: AgentType;
   abstract readonly displayName: string;
   abstract readonly defaultCapabilities: string[];
 
-  /**
-   * Resolve the absolute path to the agent's data directory.
-   * Implementations should check `userOverrides[this.type]` first,
-   * then fall back to auto-detection (well-known env vars, $HOME).
-   * Return null if the agent is not installed.
-   */
   abstract resolveDataDir(userOverride?: string): Promise<string | null>;
 
-  /**
-   * Build the canonical {@link Agent} descriptor for this collector.
-   * Calls {@link resolveDataDir} internally.
-   */
   async describe(userOverride?: string): Promise<Agent | null> {
     const dataDir = await this.resolveDataDir(userOverride);
     if (!dataDir) return null;
@@ -48,15 +42,15 @@ export abstract class BaseCollector {
 
   /**
    * Scan the agent's data directory and return normalized records.
-   * MUST be safe to call repeatedly — it is incremental by design.
-   * Only the minimal `id / type / dataDir` are required; collectors do
-   * not need the display fields.
+   * MUST be safe to call repeatedly.
    */
   abstract scan(
     agent: { id: string; type: AgentType; dataDir: string },
     opts?: ScanOptions,
   ): Promise<RawScanResult>;
 }
+
+export type ScanMode = 'full' | 'incremental';
 
 export interface ScanOptions {
   /** Only process files modified after this ISO timestamp (incremental). */
@@ -65,13 +59,20 @@ export interface ScanOptions {
   maxFiles?: number;
   /** Optional pricing overrides forwarded to computeCost(). */
   pricing?: Record<string, import('@agentos/shared').ModelPricing>;
+  /** 'full' reads everything; 'incremental' skips files matching prior state. */
+  mode?: ScanMode;
+  /**
+   * Optional prior state — backend passes `ingestion_files` rows in here
+   * so the collector can skip files that haven't changed. Key is the
+   * absolute file path. If a file is absent from this map, it's read.
+   */
+  priorFiles?: Map<string, { size: number; mtimeMs: number; contentHash: string }>;
 }
 
 /* ------------------------------------------------------------------ */
 /* Utilities                                                           */
 /* ------------------------------------------------------------------ */
 
-/** Read a file as UTF-8 text. Returns empty string if the file is missing. */
 export async function safeReadFile(p: string): Promise<string> {
   try {
     return await fs.readFile(p, 'utf8');
@@ -81,7 +82,6 @@ export async function safeReadFile(p: string): Promise<string> {
   }
 }
 
-/** Stream-read a JSONL file line-by-line and call `cb` for each parsed JSON. */
 export async function forEachJsonl<T>(
   file: string,
   cb: (record: T, raw: string, lineNo: number) => void,
@@ -109,7 +109,6 @@ export async function forEachJsonl<T>(
   return count;
 }
 
-/** Recursively list files under `dir` matching one of `extensions`. */
 export async function listFilesByExt(
   dir: string,
   extensions: string[],
@@ -140,7 +139,6 @@ export async function listFilesByExt(
   return out;
 }
 
-/** Cross-platform $HOME (Windows-safe). */
 export function homeDir(): string {
   return process.env.HOME || process.env.USERPROFILE || os.homedir();
 }
@@ -149,7 +147,6 @@ export function homeDir(): string {
 export function normalizeTimestamp(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'number') {
-    // Heuristic: seconds vs milliseconds.
     const ms = value < 1e12 ? value * 1000 : value;
     const d = new Date(ms);
     if (Number.isNaN(d.getTime())) return undefined;
@@ -166,9 +163,6 @@ export function normalizeTimestamp(value: unknown): string | undefined {
 
 /** Convert `D--project-MY-foo` style names back into readable paths. */
 export function decodeClaudeProjectDir(name: string): string {
-  // Claude encodes paths by replacing separators with `-`. We can't tell
-  // `\` from `/` apart after decoding, so we just collapse runs of `-`
-  // (which always appear between segments) and restore the drive letter.
   if (process.platform === 'win32' && /^[A-Za-z]--/.test(name)) {
     const drive = name[0];
     const rest = name.slice(3).replace(/-+/g, '/');
@@ -180,4 +174,77 @@ export function decodeClaudeProjectDir(name: string): string {
 /** Build a deterministic composite session id. */
 export function makeSessionId(agentId: string, externalId: string): string {
   return `${agentId}:${externalId}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Source provenance + file fingerprint helpers (v0.2)                 */
+/* ------------------------------------------------------------------ */
+
+/** Build a SourceMeta for a single collector run. */
+export function buildSourceMeta(
+  provider: AgentType,
+  filePath: string,
+  recordId: string,
+  collectedAt: string,
+): SourceMeta {
+  return {
+    sourceProvider: provider,
+    sourceFile: filePath,
+    sourceId: recordId,
+    collectedAt,
+  };
+}
+
+/**
+ * SHA-256 of the file contents. For very large files we hash the first
+ * `SAMPLE_BYTES` bytes + the total size — exact enough to detect edits
+ * without reading 100MB into memory.
+ */
+const SAMPLE_BYTES = 256 * 1024; // 256 KiB head sample
+export async function hashFile(filePath: string): Promise<{ size: number; mtimeMs: number; contentHash: string }> {
+  const stat = await fs.stat(filePath);
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = createReadStream(filePath, { start: 0, end: SAMPLE_BYTES - 1 });
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => {
+      // include total size so two zero-byte files don't collide
+      hash.update(`|size=${stat.size}|mtime=${stat.mtimeMs}`);
+      resolve({ size: stat.size, mtimeMs: stat.mtimeMs, contentHash: hash.digest('hex') });
+    });
+    stream.on('error', reject);
+  });
+}
+
+/**
+ * Check whether a file has changed since its last-known fingerprint.
+ * Returns `false` (skip) only if size + mtime + contentHash all match.
+ */
+export function isFileUnchanged(
+  current: { size: number; mtimeMs: number; contentHash: string },
+  prior: { size: number; mtimeMs: number; contentHash: string } | undefined,
+): boolean {
+  if (!prior) return false;
+  return (
+    current.size === prior.size &&
+    current.mtimeMs === prior.mtimeMs &&
+    current.contentHash === prior.contentHash
+  );
+}
+
+/** Convenience builder for {@link FileFingerprint}. */
+export function buildFingerprint(
+  sourceFile: string,
+  stat: { size: number; mtimeMs: number; contentHash: string },
+  counts: { sessions: number; usageRecords: number; events: number },
+): FileFingerprint {
+  return {
+    sourceFile,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    contentHash: stat.contentHash,
+    sessions: counts.sessions,
+    usageRecords: counts.usageRecords,
+    events: counts.events,
+  };
 }

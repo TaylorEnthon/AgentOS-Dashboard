@@ -2,15 +2,30 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import {
   BaseCollector,
+  buildFingerprint,
+  buildSourceMeta,
   decodeClaudeProjectDir,
   forEachJsonl,
+  hashFile,
   homeDir,
+  isFileUnchanged,
   listFilesByExt,
   makeSessionId,
   normalizeTimestamp,
   type ScanOptions,
 } from './base.js';
-import { computeCost, type ModelPricing, type AgentType, type RawScanResult, type AgentSession, type UsageRecord, type ActivityEvent } from '@agentos/shared';
+import {
+  computeCost,
+  deriveUsageConfidence,
+  worseConfidence,
+  type ModelPricing,
+  type AgentType,
+  type RawScanResult,
+  type AgentSession,
+  type UsageRecord,
+  type ActivityEvent,
+  type ConfidenceLevel,
+} from '@agentos/shared';
 
 interface ClaudeAssistantUsage {
   input_tokens?: number;
@@ -44,9 +59,7 @@ interface ClaudeRecord {
   toolUseID?: string;
   toolName?: string;
   isMeta?: boolean;
-  // queue-operation
   operation?: string;
-  // custom-title
   customTitle?: string;
 }
 
@@ -76,11 +89,15 @@ export class ClaudeCollector extends BaseCollector {
     }
   }
 
-  async scan(agent: { id: string; type: AgentType; dataDir: string }, opts: ScanOptions = {}): Promise<RawScanResult> {
+  async scan(
+    agent: { id: string; type: AgentType; dataDir: string },
+    opts: ScanOptions = {},
+  ): Promise<RawScanResult> {
     const pricing = opts.pricing ?? {};
+    const collectedAt = new Date().toISOString();
     const projectsDir = path.join(agent.dataDir, 'projects');
     if (!(await this.isDir(projectsDir))) {
-      return { agentId: agent.id, sessions: [], usage: [], events: [], projects: [] };
+      return { agentId: agent.id, collectedAt, sessions: [], usage: [], events: [], projects: [], files: [] };
     }
 
     const projectDirs = (await fs.readdir(projectsDir, { withFileTypes: true }))
@@ -91,6 +108,7 @@ export class ClaudeCollector extends BaseCollector {
     const usage: UsageRecord[] = [];
     const events: ActivityEvent[] = [];
     const projectsMap = new Map<string, { path: string; displayName: string; lastSeen: string }>();
+    const files: import('@agentos/shared').FileFingerprint[] = [];
 
     const maxFiles = opts.maxFiles ?? 5000;
     let fileCount = 0;
@@ -101,11 +119,32 @@ export class ClaudeCollector extends BaseCollector {
       const projectDisplay = decodeClaudeProjectDir(projectName);
       const projectKey = projectDisplay;
 
-      const files = await listFilesByExt(projDir, ['jsonl', 'ndjson'], { max: maxFiles - fileCount });
-      for (const file of files) {
+      const found = await listFilesByExt(projDir, ['jsonl', 'ndjson'], { max: maxFiles - fileCount });
+      for (const file of found) {
         if (fileCount >= maxFiles) break;
         fileCount++;
-        await this.parseSessionFile(file, projectKey, projectDisplay, agent.id, sessions, usage, events, pricing);
+
+        const fp = await hashFile(file);
+        const prior = opts.priorFiles?.get(file);
+        if (opts.mode === 'incremental' && isFileUnchanged(fp, prior)) {
+          continue; // unchanged — skip parse entirely
+        }
+
+        const before = {
+          sessions: sessions.length,
+          usage: usage.length,
+          events: events.length,
+        };
+        await this.parseSessionFile(
+          file, projectKey, projectDisplay, agent.id, collectedAt,
+          sessions, usage, events, pricing,
+        );
+        const counts = {
+          sessions: sessions.length - before.sessions,
+          usageRecords: usage.length - before.usage,
+          events: events.length - before.events,
+        };
+        files.push(buildFingerprint(file, fp, counts));
       }
 
       if (sessions.some((s) => s.project === projectKey)) {
@@ -122,10 +161,12 @@ export class ClaudeCollector extends BaseCollector {
 
     return {
       agentId: agent.id,
+      collectedAt,
       sessions,
       usage,
       events,
       projects: Array.from(projectsMap.values()),
+      files,
     };
   }
 
@@ -134,13 +175,16 @@ export class ClaudeCollector extends BaseCollector {
     projectKey: string,
     projectDisplay: string,
     agentId: string,
+    collectedAt: string,
     sessions: AgentSession[],
     usage: UsageRecord[],
     events: ActivityEvent[],
     pricing: Record<string, ModelPricing>,
   ): Promise<void> {
-    // Pre-scan to determine session start/end and aggregate per-session stats.
-    let externalId = '';
+    // Claude's file naming is `<session-uuid>.jsonl`; treat the filename as
+    // the authoritative session id so usage/event IDs are unique even when
+    // individual JSONL lines happen to omit `sessionId`.
+    let externalId = path.basename(file).replace(/\.[^.]+$/, '');
     let sessionStart: string | undefined;
     let sessionEnd: string | undefined;
     let title: string | undefined;
@@ -152,10 +196,13 @@ export class ClaudeCollector extends BaseCollector {
     let cacheWrite = 0;
     let fileOps = 0;
     let toolCalls = 0;
+    let worstUsageConf: ConfidenceLevel = 'exact';
+    let worstCostConf: ConfidenceLevel = 'exact';
+    let lastModelUnknown = false;
 
     await forEachJsonl<ClaudeRecord>(file, (rec, _raw, _line) => {
       const ts = normalizeTimestamp(rec.timestamp);
-      if (rec.sessionId && !externalId) externalId = rec.sessionId;
+      // (externalId is already set from the filename — do not overwrite)
       if (ts) {
         if (!sessionStart || ts < sessionStart) sessionStart = ts;
         if (!sessionEnd || ts > sessionEnd) sessionEnd = ts;
@@ -164,13 +211,15 @@ export class ClaudeCollector extends BaseCollector {
 
       if (rec.type === 'user') {
         messageCount++;
+        const evId = `${agentId}:${externalId}:${_line}:user`;
         events.push({
-          id: `${agentId}:${rec.sessionId}:${_line}:user`,
-          sessionId: makeSessionId(agentId, rec.sessionId ?? ''),
+          id: evId,
+          sessionId: makeSessionId(agentId, externalId),
           agentId,
           type: 'message',
           timestamp: ts ?? new Date().toISOString(),
           detail: rec.content?.slice(0, 200),
+          source: buildSourceMeta('claude-code', file, evId, collectedAt),
         });
       } else if (rec.type === 'assistant' && rec.message) {
         messageCount++;
@@ -186,10 +235,14 @@ export class ClaudeCollector extends BaseCollector {
           cacheRead += cr;
           cacheWrite += cw;
           const total = it + ot + cr + cw;
-          const cost = computeCost(rec.message.model, it, ot, cr, cw, pricing);
+          const breakdown = computeCost(rec.message.model, it, ot, cr, cw, pricing);
+          worstUsageConf = worseConfidence(worstUsageConf, deriveUsageConfidence(it, ot, true));
+          worstCostConf = worseConfidence(worstCostConf, breakdown.costConfidence);
+          lastModelUnknown = breakdown.costConfidence === 'unknown';
+          const usageId = `${agentId}:${externalId}:${_line}:u`;
           usage.push({
-            id: `${agentId}:${rec.sessionId}:${_line}:u`,
-            sessionId: makeSessionId(agentId, rec.sessionId ?? ''),
+            id: usageId,
+            sessionId: makeSessionId(agentId, externalId),
             agentId,
             model: rec.message.model ?? 'unknown',
             inputTokens: it,
@@ -197,23 +250,33 @@ export class ClaudeCollector extends BaseCollector {
             cacheReadTokens: cr,
             cacheWriteTokens: cw,
             totalTokens: total,
-            estimatedCost: cost.total,
+            estimatedCost: breakdown.total,
             timestamp: ts ?? new Date().toISOString(),
+            usageConfidence: deriveUsageConfidence(it, ot, true),
+            costConfidence: breakdown.costConfidence,
+            unknownModel: breakdown.costConfidence === 'unknown',
+            source: buildSourceMeta('claude-code', file, usageId, collectedAt),
           });
+        } else {
+          worstUsageConf = worseConfidence(worstUsageConf, 'unknown');
         }
-        for (const block of rec.message.content ?? []) {
+        const blocks = rec.message.content ?? [];
+        for (let bi = 0; bi < blocks.length; bi++) {
+          const block = blocks[bi];
           if (block.type === 'tool_use') {
             toolCalls++;
             const toolName = block.name ?? 'unknown';
             if (/read|file/i.test(toolName)) fileOps++;
+            const evId = `${agentId}:${externalId}:${_line}:b${bi}`;
             events.push({
-              id: `${agentId}:${rec.sessionId}:${_line}:${block.id ?? toolName}`,
-              sessionId: makeSessionId(agentId, rec.sessionId ?? ''),
+              id: evId,
+              sessionId: makeSessionId(agentId, externalId),
               agentId,
               type: 'tool-call',
               timestamp: ts ?? new Date().toISOString(),
               detail: toolName,
               meta: typeof block.input === 'object' ? (block.input as Record<string, unknown>) : undefined,
+              source: buildSourceMeta('claude-code', file, evId, collectedAt),
             });
           }
         }
@@ -221,10 +284,12 @@ export class ClaudeCollector extends BaseCollector {
     });
 
     if (!externalId || !sessionStart) return;
-    const totalCost = computeCost(lastModel, inputTokens, outputTokens, cacheRead, cacheWrite, pricing).total;
+    const totalBreakdown = computeCost(lastModel, inputTokens, outputTokens, cacheRead, cacheWrite, pricing);
+    if (totalBreakdown.costConfidence === 'unknown') lastModelUnknown = true;
 
+    const sessionId = makeSessionId(agentId, externalId);
     sessions.push({
-      id: makeSessionId(agentId, externalId),
+      id: sessionId,
       agentId,
       agentType: this.type,
       externalId,
@@ -239,9 +304,12 @@ export class ClaudeCollector extends BaseCollector {
       totalInputTokens: inputTokens,
       totalOutputTokens: outputTokens,
       totalTokens: inputTokens + outputTokens + cacheRead + cacheWrite,
-      estimatedCost: totalCost,
+      estimatedCost: totalBreakdown.total,
       fileOps,
       toolCalls,
+      usageConfidence: worstUsageConf,
+      costConfidence: worstCostConf,
+      source: buildSourceMeta('claude-code', file, sessionId, collectedAt),
     });
   }
 }

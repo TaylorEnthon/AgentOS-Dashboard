@@ -4,6 +4,8 @@
  */
 import type { AgentType } from '@agentos/shared';
 
+export type Confidence = 'exact' | 'estimated' | 'unknown';
+
 export interface AgentDto {
   id: string;
   name: string;
@@ -15,6 +17,13 @@ export interface AgentDto {
   sessions: number;
   tokens: number;
   cost: number;
+}
+
+export interface SourceMetaDto {
+  sourceFile: string;
+  sourceProvider: AgentType;
+  sourceId: string;
+  collectedAt: string;
 }
 
 export interface SessionDto {
@@ -36,6 +45,9 @@ export interface SessionDto {
   estimatedCost: number;
   fileOps: number;
   toolCalls: number;
+  usageConfidence?: Confidence;
+  costConfidence?: Confidence;
+  source?: SourceMetaDto;
 }
 
 export interface ProjectDto {
@@ -91,6 +103,10 @@ export interface SessionDetailDto extends SessionDto {
     totalTokens: number;
     estimatedCost: number;
     timestamp: string;
+    usageConfidence: Confidence;
+    costConfidence: Confidence;
+    unknownModel: boolean;
+    source?: SourceMetaDto;
   }>;
   events: Array<{
     id: string;
@@ -100,7 +116,42 @@ export interface SessionDetailDto extends SessionDto {
     timestamp: string;
     detail?: string | null;
     meta?: Record<string, unknown>;
+    source?: SourceMetaDto;
   }>;
+}
+
+export interface DataHealthDto {
+  totalSessions: number;
+  totalUsageRecords: number;
+  totalEvents: number;
+  usage: { exact: number; estimated: number; unknown: number };
+  cost: { exact: number; estimated: number; unknown: number };
+  duplicatesPrevented: number;
+  lastScanAt?: string;
+  ingestionFiles: number;
+  ingestionFileSize: number;
+  perAgent: Array<{
+    agentId: string;
+    lastScanAt?: string;
+    files: number;
+    sessions: number;
+    usage: number;
+    duplicates: number;
+  }>;
+}
+
+export interface IngestionFileDto {
+  id: string;
+  provider: AgentType;
+  file_path: string;
+  size: number;
+  mtime_ms: number;
+  content_hash: string;
+  last_scanned_at: string;
+  sessions: number;
+  usage_records: number;
+  events: number;
+  duplicates_prevented: number;
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
@@ -108,9 +159,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     ...init,
   });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${path}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${path}`);
   return res.json() as Promise<T>;
 }
 
@@ -127,7 +176,16 @@ export const api = {
   },
   session: (id: string) => http<SessionDetailDto>(`/api/sessions/${encodeURIComponent(id)}`),
   projects: () => http<ProjectDto[]>('/api/projects'),
-  refresh: () => http<{ ok: boolean; ts: string; reports: Array<{ agentId: string; sessions: number; usage: number; events: number; projects: number; ms: number; error?: string }> }>('/api/refresh', { method: 'POST' }),
+  refresh: (forceFull = false) =>
+    http<{ ok: boolean; ts: string; mode: string; reports: Array<{ agentId: string; sessions: number; usage: number; events: number; filesScanned: number; duplicatesPrevented: number; ms: number; error?: string }> }>(
+      '/api/refresh',
+      { method: 'POST', body: JSON.stringify({ forceFull }) },
+    ),
   settings: () => http<SettingsDto>('/api/settings'),
   saveSettings: (s: Partial<SettingsDto>) => http<SettingsDto>('/api/settings', { method: 'PUT', body: JSON.stringify(s) }),
+
+  // v0.2
+  dataHealth: () => http<DataHealthDto>('/api/data-health'),
+  ingestionFiles: (provider?: AgentType) =>
+    http<IngestionFileDto[]>(`/api/ingestion-files${provider ? `?provider=${encodeURIComponent(provider)}` : ''}`),
 };

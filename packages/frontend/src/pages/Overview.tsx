@@ -6,6 +6,7 @@ import { Button } from '../components/ui/button';
 import { Table, TBody, TD, TH, THead, TR } from '../components/ui/table';
 import { BarChart, LineChart } from '../components/charts';
 import { formatCompact, formatRelative, formatUSD, statusColor } from '../lib/format';
+import { formatCost } from '@agentos/shared';
 
 const AGENT_COLOR: Record<string, string> = {
   'claude-code': '#f59e0b',
@@ -51,7 +52,7 @@ export function OverviewPage() {
         <StatCard label="Active agents" value={`${data.enabledAgents}`} sub={`of ${data.totalAgents} installed`} />
         <StatCard label="Total sessions" value={formatCompact(data.totalSessions)} sub={`${data.activeSessions} running`} />
         <StatCard label="Today tokens" value={formatCompact(data.todayTokens)} sub={`${data.todaySessions} sessions`} />
-        <StatCard label="Today cost" value={formatUSD(data.todayCost)} sub={`lifetime ${formatUSD(data.totalCost)}`} />
+        <StatCard label="Today cost" value={formatCost(data.todayCost, undefined)} sub={`lifetime ${formatCost(data.totalCost, undefined)}`} />
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
