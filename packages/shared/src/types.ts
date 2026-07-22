@@ -328,6 +328,65 @@ export interface ResumeCommand {
   notes?: string;
 }
 
+/* ---------------- v0.8: Execution Intelligence ---------------- */
+
+/**
+ * Lifecycle status of a derived Execution. Three-state on purpose:
+ *  - `running`   last activity within ACTIVE_THRESHOLD_S
+ *  - `completed` end_time set OR has any associated git commit
+ *  - `unknown`   end_time null, no commits, last activity older than threshold
+ */
+export type ExecutionStatus = 'running' | 'completed' | 'unknown';
+
+/**
+ * A derived "execution" — one logical task within a Session.
+ *
+ * An Execution is NOT stored anywhere. It is a pure projection over
+ * `activity_events` ⨝ `usage_records` ⨝ `git_commits` for one Session,
+ * grouped by a 30-minute gap rule (see execution-service.ts).
+ *
+ * Use cases the Session model alone can't answer:
+ *  - "What did the agent actually do in this 2h slot?"
+ *  - "Which edit produced commit X?"
+ *  - "How much did this task cost?"
+ *  - "Is this development cycle finished or still running?"
+ */
+export interface AgentExecution {
+  /** Stable id derived from session + group index, e.g. `claude-code:abc:exec-2`. */
+  id: string;
+  sessionId: string;
+  agentId: string;
+  agentType: AgentType;
+  /** Raw project path. */
+  project: string;
+  /** Display path (may differ from `project` if the agent URL-encodes it). */
+  projectDisplay: string;
+  /** Best-effort title: session.displayName → session.title → inferred. */
+  title?: string | null;
+  /** Inclusive start (earliest event in the group). */
+  startTime: string;
+  /** Exclusive end (latest event's timestamp + grace, or now if still running). */
+  endTime?: string | null;
+  durationMs: number;
+  eventCount: number;
+  tokenUsage: number;
+  cost: number;
+  /** Git commits whose timestamp falls in [startTime, endTime]. */
+  commits: GitCommitInfo[];
+  status: ExecutionStatus;
+}
+
+/**
+ * Full Execution detail — adds the events and usage that fed the summary.
+ * Returned by `GET /api/executions/:id`.
+ */
+export interface ExecutionDetail extends AgentExecution {
+  /** Events that composed this execution, oldest first. */
+  events: TimelineItem[];
+  /** Usage records that fell in the execution window. */
+  usage: UsageRecord[];
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

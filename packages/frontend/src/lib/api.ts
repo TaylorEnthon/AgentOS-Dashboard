@@ -257,6 +257,49 @@ export interface SessionResumeDto {
   notes?: string;
 }
 
+/* ---------------- v0.8: Execution Intelligence ---------------- */
+
+export type ExecutionStatus = 'running' | 'completed' | 'unknown';
+
+export interface AgentExecutionDto {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  agentType: AgentType;
+  project: string;
+  projectDisplay: string;
+  title?: string | null;
+  startTime: string;
+  endTime?: string | null;
+  durationMs: number;
+  eventCount: number;
+  tokenUsage: number;
+  cost: number;
+  commits: GitCommitDto[];
+  status: ExecutionStatus;
+}
+
+export interface ExecutionDetailDto extends AgentExecutionDto {
+  events: TimelineItemDto[];
+  usage: Array<{
+    id: string;
+    sessionId: string;
+    agentId: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    totalTokens: number;
+    estimatedCost: number;
+    timestamp: string;
+    usageConfidence: Confidence;
+    costConfidence: Confidence;
+    unknownModel: boolean;
+    source?: SourceMetaDto;
+  }>;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -338,4 +381,19 @@ export const api = {
     }),
   sessionResume: (id: string) =>
     http<SessionResumeDto>(`/api/sessions-v2/${encodeURIComponent(id)}/resume`),
+
+  // v0.8: Execution Intelligence
+  executions: (params: { agent?: string; session?: string; project?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === undefined || v === '') return;
+      q.set(k, String(v));
+    });
+    const qs = q.toString();
+    return http<AgentExecutionDto[]>(`/api/executions${qs ? `?${qs}` : ''}`);
+  },
+  execution: (id: string) =>
+    http<ExecutionDetailDto>(`/api/executions/${encodeURIComponent(id)}`),
+  sessionExecutions: (sessionId: string) =>
+    http<AgentExecutionDto[]>(`/api/sessions-v2/${encodeURIComponent(sessionId)}/executions`),
 };

@@ -8,11 +8,14 @@ import { DataHealthPage } from './pages/DataHealth';
 import { TimelinePage } from './pages/Timeline';
 import { SessionsPage } from './pages/Sessions';
 import { SessionDetailPage } from './pages/SessionDetail';
+import { ExecutionsPage } from './pages/Executions';
+import { ExecutionDetailPage } from './pages/ExecutionDetail';
 import { cn } from './lib/format';
 
 const NAV = [
   { to: '/', label: 'Overview', end: true },
   { to: '/sessions', label: 'Sessions' },
+  { to: '/executions', label: 'Executions' },
   { to: '/timeline', label: 'Timeline' },
   { to: '/agents', label: 'Agents' },
   { to: '/projects', label: 'Projects' },
@@ -28,7 +31,7 @@ export function App() {
           <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-primary-foreground font-bold">A</div>
           <div>
             <div className="font-semibold leading-tight">AgentOS</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.7</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.8</div>
           </div>
         </div>
         <nav className="flex flex-col gap-1">
@@ -58,6 +61,8 @@ export function App() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
+          <Route path="/executions" element={<ExecutionsPage />} />
+          <Route path="/executions/:id" element={<ExecutionDetailPage />} />
           <Route path="/timeline" element={<TimelinePage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/agents/:id" element={<AgentDetailPage />} />

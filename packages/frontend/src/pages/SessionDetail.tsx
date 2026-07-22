@@ -232,6 +232,9 @@ export function SessionDetailPage() {
         </CardContent>
       </Card>
 
+      {/* Executions (v0.8 derived view) */}
+      <ExecutionsSection sessionId={data.id} />
+
       {/* Recent events */}
       <Card>
         <CardHeader>
@@ -286,6 +289,76 @@ function formatDuration(ms: number | null): string {
   if (h < 24) return `${h}h ${m % 60}m`;
   const d = Math.floor(h / 24);
   return `${d}d ${h % 24}h`;
+}
+
+/* ---------------- v0.8 Executions section ---------------- */
+
+function ExecutionsSection({ sessionId }: { sessionId: string }) {
+  const [items, setItems] = useState<import('../lib/api').AgentExecutionDto[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.sessionExecutions(sessionId)
+      .then(setItems)
+      .catch((e) => setErr(String(e)));
+  }, [sessionId]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Executions</CardTitle>
+        <CardDescription>
+          Derived from this session's activity using a 30-minute gap rule.
+          Each execution groups the work for one logical task.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && items.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No executions yet — once activity events arrive, they'll be grouped here.
+          </p>
+        )}
+        {items.length > 0 && (
+          <ul className="space-y-1.5">
+            {items.map((exec) => (
+              <li key={exec.id}>
+                <Link
+                  to={`/executions/${encodeURIComponent(exec.id)}`}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:border-foreground/30"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium" title={exec.title ?? exec.id}>
+                        {exec.title ?? `Execution #${exec.id.split(':exec-')[1]}`}
+                      </span>
+                      <StatusBadge status={exec.status} />
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                      {formatRelative(exec.startTime)}{exec.endTime ? ` → ${formatRelative(exec.endTime)}` : ''}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3 text-xs tabular-nums text-muted-foreground">
+                    <span>{exec.eventCount} events</span>
+                    <span>{formatCompact(exec.tokenUsage)} tokens</span>
+                    {exec.commits.length > 0 && <span>{exec.commits.length} commits</span>}
+                  </div>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function StatusBadge({ status }: { status: 'running' | 'completed' | 'unknown' }) {
+  switch (status) {
+    case 'running':   return <Badge tone="info" className="text-[10px]">● running</Badge>;
+    case 'completed': return <Badge tone="success" className="text-[10px]">✓ completed</Badge>;
+    case 'unknown':   return <Badge tone="muted" className="text-[10px]">? unknown</Badge>;
+  }
 }
 
 /* ---------------- Metadata editor ---------------- */

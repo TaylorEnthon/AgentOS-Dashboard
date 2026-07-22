@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { Db } from './db.js';
+import { humanAction } from './db.js';
 import { Scheduler } from './scheduler.js';
 import { DEFAULT_PRICING } from '@agentos/shared';
 import type { SettingsStore } from './settings.js';
@@ -7,6 +8,12 @@ import type { ConfidenceLevel } from '@agentos/shared';
 import { eventBus, type RealtimeEvent } from './event-bus.js';
 import { deriveAgentStatus, type AgentStatusRow } from './agent-status.js';
 import { buildResumeCommand } from './resume.js';
+import {
+  associateCommitsToExecutions,
+  associateUsageToExecutions,
+  buildExecution,
+  groupEventsIntoExecutions,
+} from './execution-service.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -275,6 +282,190 @@ export function registerRoutes(
     return buildResumeCommand(row.agent_id.split(':')[0] as never, row.external_id);
   });
 
+  /* ---------------- v0.8: Execution Intelligence ---------------- */
+
+  // v0.8-a: list executions derived from sessions + events
+  app.get<{
+    Querystring: {
+      agent?: string;
+      session?: string;
+      project?: string;
+      limit?: string;
+    };
+  }>('/api/executions', async (req) => {
+    const { agent, session, project, limit } = req.query;
+    const lim = Math.max(1, Math.min(limit ? Number(limit) : 200, 1000));
+
+    // Fetch candidate sessions matching the filters.
+    const sessions = db.listSessions({
+      agentId: agent,
+      project,
+      limit: 1000,
+    }).filter((s) => !session || s.id === session);
+
+    const out: import('@agentos/shared').AgentExecution[] = [];
+    for (const s of sessions) {
+      const events = db.listEventsForSession(s.id, 1000).map(rowToTimelineItem);
+      // listEventsForSession returns ASC; groupEventsIntoExecutions needs ASC.
+      const groups = groupEventsIntoExecutions(events);
+      if (groups.length === 0) continue;
+      const usage = db.listUsageForSession(s.id).map(rowToUsageDto);
+      const usageByGroup = associateUsageToExecutions(groups, usage);
+
+      // Pull commits for the whole session's time window — read-only, optional.
+      let commits: import('@agentos/shared').GitCommitInfo[] = [];
+      if (s.project_display || s.project) {
+        try {
+          const { commitsInRange, findRepoRoot } = await import('./git-service.js');
+          const root = await findRepoRoot(s.project_display || s.project);
+          if (root) {
+            commits = await commitsInRange(
+              root,
+              s.start_time,
+              s.end_time ?? new Date().toISOString(),
+              200,
+            );
+          }
+        } catch {
+          // git failure is non-fatal — execution just has no commits
+        }
+      }
+      const commitsByGroup = associateCommitsToExecutions(groups, commits);
+
+      const meta = db.getSessionMetadata(s.id);
+      for (const g of groups) {
+        const exec = buildExecution(
+          s.id,
+          s.agent_id,
+          s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+          s.project,
+          s.project_display || s.project,
+          g,
+          commitsByGroup.get(g.index) ?? [],
+          usageByGroup.get(g.index) ?? [],
+        );
+        // Inject metadata-based title override (displayName wins).
+        if (meta?.displayName) exec.title = meta.displayName;
+        out.push(exec);
+      }
+    }
+
+    // Newest execution first; pinned session's executions naturally stay
+    // near each other because the grouping happens inside each session.
+    out.sort((a, b) => b.startTime.localeCompare(a.startTime));
+    return out.slice(0, lim);
+  });
+
+  // v0.8-b: execution detail — full events + usage + commits for one execution
+  app.get<{ Params: { id: string } }>('/api/executions/:id', async (req, reply) => {
+    // id format: `${sessionId}:exec-${index}`
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    const indexStr = req.params.id.slice(lastColon + ':exec-'.length);
+    const index = Number.parseInt(indexStr, 10);
+    if (!Number.isFinite(index) || index < 0) {
+      return reply.code(400).send({ error: 'malformed execution index' });
+    }
+
+    const s = db.getSession(sessionId);
+    if (!s) return reply.code(404).send({ error: 'session not found' });
+
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const groups = groupEventsIntoExecutions(events);
+    const group = groups[index];
+    if (!group) return reply.code(404).send({ error: 'execution not found in session' });
+
+    const usage = db.listUsageForSession(s.id).map(rowToUsageDto);
+    const usageByGroup = associateUsageToExecutions(groups, usage);
+
+    let commits: import('@agentos/shared').GitCommitInfo[] = [];
+    if (s.project_display || s.project) {
+      try {
+        const { commitsInRange, findRepoRoot } = await import('./git-service.js');
+        const root = await findRepoRoot(s.project_display || s.project);
+        if (root) {
+          commits = await commitsInRange(
+            root,
+            s.start_time,
+            s.end_time ?? new Date().toISOString(),
+            200,
+          );
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const commitsByGroup = associateCommitsToExecutions(groups, commits);
+
+    const exec = buildExecution(
+      s.id,
+      s.agent_id,
+      s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+      s.project,
+      s.project_display || s.project,
+      group,
+      commitsByGroup.get(group.index) ?? [],
+      usageByGroup.get(group.index) ?? [],
+    );
+    const meta = db.getSessionMetadata(s.id);
+    if (meta?.displayName) exec.title = meta.displayName;
+
+    return {
+      ...exec,
+      events: group.events,
+      usage: usageByGroup.get(group.index) ?? [],
+    };
+  });
+
+  // v0.8-c: executions for one session (used by SessionDetail page)
+  app.get<{ Params: { id: string } }>('/api/sessions-v2/:id/executions', async (req, reply) => {
+    const s = db.getSession(req.params.id);
+    if (!s) return reply.code(404).send({ error: 'session not found' });
+
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const groups = groupEventsIntoExecutions(events);
+    if (groups.length === 0) return [];
+
+    const usage = db.listUsageForSession(s.id).map(rowToUsageDto);
+    const usageByGroup = associateUsageToExecutions(groups, usage);
+
+    let commits: import('@agentos/shared').GitCommitInfo[] = [];
+    if (s.project_display || s.project) {
+      try {
+        const { commitsInRange, findRepoRoot } = await import('./git-service.js');
+        const root = await findRepoRoot(s.project_display || s.project);
+        if (root) {
+          commits = await commitsInRange(
+            root,
+            s.start_time,
+            s.end_time ?? new Date().toISOString(),
+            200,
+          );
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+    const commitsByGroup = associateCommitsToExecutions(groups, commits);
+
+    const meta = db.getSessionMetadata(s.id);
+    return groups.map((g) => {
+      const exec = buildExecution(
+        s.id,
+        s.agent_id,
+        s.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+        s.project,
+        s.project_display || s.project,
+        g,
+        commitsByGroup.get(g.index) ?? [],
+        usageByGroup.get(g.index) ?? [],
+      );
+      if (meta?.displayName) exec.title = meta.displayName;
+      return exec;
+    });
+  });
+
   /* ---------------- v0.6 Git integration ---------------- */
 
   app.get<{ Params: { id: string } }>('/api/git/sessions/:id', async (req, reply) => {
@@ -445,6 +636,56 @@ function rowToEventDto(r: import('./db.js').EventRow) {
     timestamp: r.timestamp,
     detail: r.detail,
     meta: r.meta ? JSON.parse(r.meta) : undefined,
+    source: r.source_file
+      ? {
+          sourceFile: r.source_file,
+          sourceProvider: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+          sourceId: r.source_id ?? r.id,
+          collectedAt: r.collected_at ?? '',
+        }
+      : undefined,
+  };
+}
+
+/**
+ * v0.8: convert a raw EventRow into a TimelineItem (for grouping +
+ * execution projection). We don't join sessions here — caller supplies
+ * project/display via the surrounding session.
+ */
+function rowToTimelineItem(r: import('./db.js').EventRow): import('@agentos/shared').TimelineItem {
+  return {
+    id: r.id,
+    agentId: r.agent_id,
+    agentType: r.agent_id.split(':')[0] as import('@agentos/shared').AgentType,
+    sessionId: r.session_id,
+    sessionTitle: null,
+    project: '',
+    projectDisplay: '',
+    timestamp: r.timestamp,
+    type: r.type as import('@agentos/shared').TimelineItem['type'],
+    action: humanAction(r.type, r.detail),
+    detail: r.detail,
+    meta: r.meta ? (JSON.parse(r.meta) as Record<string, unknown>) : null,
+  };
+}
+
+/** v0.8: convert a raw UsageRow into the shared UsageRecord shape. */
+function rowToUsageDto(r: import('./db.js').UsageRow): import('@agentos/shared').UsageRecord {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    agentId: r.agent_id,
+    model: r.model,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheReadTokens: r.cache_read_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    totalTokens: r.total_tokens,
+    estimatedCost: r.estimated_cost,
+    timestamp: r.timestamp,
+    usageConfidence: r.usage_confidence,
+    costConfidence: r.cost_confidence,
+    unknownModel: r.unknown_model !== 0,
     source: r.source_file
       ? {
           sourceFile: r.source_file,

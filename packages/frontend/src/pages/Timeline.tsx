@@ -63,6 +63,8 @@ export function TimelinePage() {
   const [items, setItems] = useState<TimelineItemDto[]>([]);
   const [agents, setAgents] = useState<AgentStatusDto[]>([]);
   const [git, setGit] = useState<GitSessionInfoDto | null>(null);
+  /** v0.8: index event.timestamp → execution it belongs to. */
+  const [execIndex, setExecIndex] = useState<Map<string, import('../lib/api').AgentExecutionDto>>(new Map());
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState<string | undefined>(undefined);
@@ -84,11 +86,17 @@ export function TimelinePage() {
     const gitPromise = filters.session
       ? api.gitSessionCommits(filters.session).catch(() => null)
       : Promise.resolve(null);
-    Promise.all([api.timeline(filters), api.agentStatus(), gitPromise])
-      .then(([tl, ag, g]) => {
+    // v0.8: when a single session is selected, fetch its derived executions
+    // so we can label each event with the execution it belongs to.
+    const execsPromise = filters.session
+      ? api.sessionExecutions(filters.session).catch(() => [])
+      : Promise.resolve([]);
+    Promise.all([api.timeline(filters), api.agentStatus(), gitPromise, execsPromise])
+      .then(([tl, ag, g, execs]) => {
         setItems(tl);
         setAgents(ag);
         setGit(g);
+        setExecIndex(buildExecIndex(execs));
         setLastLoadedAt(new Date().toISOString());
         setErr(null);
       })
@@ -180,7 +188,7 @@ export function TimelinePage() {
                 </h3>
                 <ul className="space-y-1.5">
                   {dayItems.map((item) => (
-                    <TimelineRow key={item.id} item={item} />
+                    <TimelineRow key={item.id} item={item} execIndex={execIndex} />
                   ))}
                 </ul>
               </li>
@@ -339,7 +347,10 @@ function gitCommitToTimeline(
   };
 }
 
-function TimelineRow({ item }: { item: TimelineItemDto }) {
+function TimelineRow({ item, execIndex }: {
+  item: TimelineItemDto;
+  execIndex: Map<string, import('../lib/api').AgentExecutionDto>;
+}) {
   const tone = typeTone(item.type);
   return (
     <li className="flex items-start gap-3 rounded-md border border-border bg-card px-3 py-2">
@@ -378,6 +389,23 @@ function TimelineRow({ item }: { item: TimelineItemDto }) {
               </Link>
             </>
           )}
+          {(() => {
+            const exec = findExecutionForEvent(item, execIndex);
+            if (!exec) return null;
+            return (
+              <>
+                <span>·</span>
+                <Link
+                  to={`/executions/${encodeURIComponent(exec.id)}`}
+                  className="text-primary hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                  title={exec.title ?? exec.id}
+                >
+                  execution: {exec.title ?? exec.id.split(':exec-')[1]} →
+                </Link>
+              </>
+            );
+          })()}
         </div>
         {item.meta && Object.keys(item.meta).length > 0 && (
           <details className="mt-1">
@@ -444,4 +472,64 @@ function formatDay(yyyymmdd: string): string {
   if (t === today.getTime()) return 'Today';
   if (t === yesterday.getTime()) return 'Yesterday';
   return d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/* ---------------- v0.8 Execution helpers ---------------- */
+
+/**
+ * Build a lookup from event timestamp → execution, so each Timeline
+ * row can render its execution link without scanning every execution.
+ *
+ * Key strategy: index by an event id we already have in the row. For
+ * each execution, expand its [startTime, endTime] window and map any
+ * event id that falls inside. We do this by walking the executions
+ * in chronological order and bucketing events by their position
+ * relative to the gaps (same rule as the backend associate fns).
+ *
+ * Simpler approach used here: re-derive the group boundary from the
+ * gap rule on the client. The result is purely a UI helper and does
+ * NOT need to match the backend exactly — only "an event shows
+ * SOME execution belonging to its session, or none".
+ */
+function buildExecIndex(
+  execs: import('../lib/api').AgentExecutionDto[],
+): Map<string, import('../lib/api').AgentExecutionDto> {
+  // We don't have event ids here. Instead, return the executions
+  // themselves; the per-row lookup uses timestamp matching against
+  // the executions we have.
+  const map = new Map<string, import('../lib/api').AgentExecutionDto>();
+  // Index by execution id for cheap .get() in the row renderer.
+  for (const e of execs) map.set(e.id, e);
+  return map;
+}
+
+function findExecutionForEvent(
+  item: TimelineItemDto,
+  execIndex: Map<string, import('../lib/api').AgentExecutionDto>,
+): import('../lib/api').AgentExecutionDto | null {
+  if (execIndex.size === 0) return null;
+  if (item.type === 'git-commit') return null; // git commits aren't part of executions
+  const itemTs = Date.parse(item.timestamp);
+  if (!Number.isFinite(itemTs)) return null;
+  // Linear scan over the executions for this session — there are
+  // typically < 20 executions per session so this is cheap.
+  let best: import('../lib/api').AgentExecutionDto | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const exec of execIndex.values()) {
+    if (exec.sessionId !== item.sessionId) continue;
+    const s = Date.parse(exec.startTime);
+    const e = Date.parse(exec.endTime ?? exec.startTime);
+    // Mirror the backend grace window so single-event execs still match.
+    const GRACE_MS = 30 * 60 * 1000;
+    if (itemTs >= s && itemTs <= e + GRACE_MS) {
+      // Prefer the exec whose center is closest to the event.
+      const center = (s + e) / 2;
+      const dist = Math.abs(itemTs - center);
+      if (dist < bestDist) {
+        best = exec;
+        bestDist = dist;
+      }
+    }
+  }
+  return best;
 }
