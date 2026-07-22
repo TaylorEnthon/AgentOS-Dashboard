@@ -21,10 +21,13 @@ import {
   api,
   type AgentExecutionDto,
   type AgentStatusDto,
+  type AttentionItemDto,
   type DerivedLifecycleStatus,
   type ExecutionBoardColumn,
   type LifecycleConflictDto,
+  type LifecycleHealthScoreDto,
   type LifecycleSnapshotDto,
+  type WorkspaceHealthSummaryDto,
 } from '../lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -69,6 +72,11 @@ export function WorkspacePage() {
   const [lifecycleMap, setLifecycleMap] = useState<Record<string, LifecycleSnapshotDto>>({});
   /** v1.2: manual vs derived conflict map. */
   const [conflictMap, setConflictMap] = useState<Record<string, LifecycleConflictDto>>({});
+  /** v1.3: health scores keyed by execution id. */
+  const [healthMap, setHealthMap] = useState<Record<string, LifecycleHealthScoreDto>>({});
+  /** v1.3: workspace summary + attention queue. */
+  const [summary, setSummary] = useState<WorkspaceHealthSummaryDto | null>(null);
+  const [attention, setAttention] = useState<AttentionItemDto[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -132,15 +140,26 @@ export function WorkspacePage() {
           // v1.1: fetch derived lifecycle snapshots in one batch call
           // so each card can show its derived state alongside manual.
           // v1.2: also fetch conflict map for the conflict warning.
+          // v1.3: also fetch health scores + workspace summary + attention queue.
           if (rows.length > 0) {
             const ids = rows.map((r) => r.id);
             Promise.all([
               api.lifecycleBatch(ids).then(setLifecycleMap).catch(() => undefined),
               api.conflictBatch(ids).then(setConflictMap).catch(() => undefined),
+              api.healthBatch(ids).then(setHealthMap).catch(() => undefined),
             ]);
+            // Summary + attention: cheap, fetch independently.
+            api.workspaceSummary().then(setSummary).catch(() => undefined);
+            api.attentionQueue(50).then(setAttention).catch(() => undefined);
           } else {
             setLifecycleMap({});
             setConflictMap({});
+            setHealthMap({});
+            setSummary({
+              healthy: 0, warning: 0, critical: 0, conflictCount: 0,
+              longestRunning: null, total: 0, computedAt: new Date().toISOString(),
+            });
+            setAttention([]);
           }
         })
         .catch((e) => setErr(String(e)))
@@ -254,6 +273,12 @@ export function WorkspacePage() {
         </CardContent>
       </Card>
 
+      {/* v1.3: Workspace Health Summary */}
+      {summary && <SummaryHeader summary={summary} />}
+
+      {/* v1.3: Attention Queue */}
+      <AttentionQueueSection items={attention} />
+
       {/* Six-column board */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {COLUMNS.map((col) => {
@@ -295,6 +320,158 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
+}
+
+/**
+ * v1.3: top-of-page workspace health summary. Pure presentational —
+ * pulls counts from a pre-fetched WorkspaceHealthSummaryDto.
+ */
+function SummaryHeader({ summary }: { summary: WorkspaceHealthSummaryDto }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
+      <SummaryStat label="Healthy" value={summary.healthy} tone="success" />
+      <SummaryStat label="Warning" value={summary.warning} tone="warning" />
+      <SummaryStat label="Critical" value={summary.critical} tone="danger" />
+      <SummaryStat label="Conflicts" value={summary.conflictCount} tone="info" />
+      <SummaryLongest summary={summary} />
+    </div>
+  );
+}
+
+function SummaryStat({ label, value, tone }: { label: string; value: number; tone: 'success' | 'warning' | 'danger' | 'info' }) {
+  const toneClass = {
+    success: 'border-emerald-300/60 bg-emerald-50/40 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-950/20 dark:text-emerald-300',
+    warning: 'border-amber-300/60 bg-amber-50/40 text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/20 dark:text-amber-300',
+    danger:  'border-rose-300/60 bg-rose-50/40 text-rose-700 dark:border-rose-700/60 dark:bg-rose-950/20 dark:text-rose-300',
+    info:    'border-blue-300/60 bg-blue-50/40 text-blue-700 dark:border-blue-700/60 dark:bg-blue-950/20 dark:text-blue-300',
+  }[tone];
+  return (
+    <div className={cn('rounded-md border px-3 py-2', toneClass)}>
+      <div className="text-[10px] uppercase tracking-wider text-current/70">{label}</div>
+      <div className="text-2xl font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+function SummaryLongest({ summary }: { summary: WorkspaceHealthSummaryDto }) {
+  const lr = summary.longestRunning;
+  if (!lr) {
+    return (
+      <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <div className="text-[10px] uppercase tracking-wider">Longest active</div>
+        <div className="mt-2">—</div>
+      </div>
+    );
+  }
+  return (
+    <Link
+      to={`/executions/${encodeURIComponent(lr.executionId)}`}
+      className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs hover:border-foreground/30"
+    >
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Longest active</div>
+      <div className="mt-1 font-mono text-[11px] truncate" title={lr.executionId}>
+        {lr.executionId.split(':exec-')[1]
+          ? `…:exec-${lr.executionId.split(':exec-')[1]}`
+          : lr.executionId}
+      </div>
+      <div className="mt-0.5 text-foreground/90 tabular-nums">{formatDuration(lr.durationMs)} · {lr.derivedStatus}</div>
+    </Link>
+  );
+}
+
+/**
+ * v1.3: Attention Queue — items the user should look at.
+ * Read-only cards. Empty state when nothing needs attention.
+ */
+function AttentionQueueSection({ items }: { items: AttentionItemDto[] }) {
+  if (items.length === 0) {
+    return (
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle>Attention Queue</CardTitle>
+          <CardDescription>
+            Items here mean an execution needs human review — conflict,
+            blocked too long, or stale. Empty is the happy state.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-emerald-700 dark:text-emerald-400">
+            ✓ Nothing needs your attention right now.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle>Attention Queue ({items.length})</CardTitle>
+        <CardDescription>
+          Sorted by severity. Read-only — these are suggestions, not actions.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ul className="space-y-2">
+          {items.slice(0, 10).map((it) => (
+            <li key={it.executionId}>
+              <Link
+                to={`/executions/${encodeURIComponent(it.executionId)}`}
+                className={cn(
+                  'flex items-start gap-3 rounded-md border bg-background p-2.5 text-sm transition-colors hover:border-foreground/30',
+                  it.severity === 'critical' ? 'border-rose-300/60' :
+                  it.severity === 'high' ? 'border-amber-300/60' :
+                  it.severity === 'medium' ? 'border-blue-300/60' :
+                  'border-border',
+                )}
+              >
+                <AttentionSeverityBadge severity={it.severity} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <code className="font-mono text-[11px] text-muted-foreground truncate" title={it.executionId}>
+                      {it.executionId}
+                    </code>
+                    {it.derivedStatus && (
+                      <Badge tone="muted" className="text-[10px]">{it.derivedStatus}</Badge>
+                    )}
+                  </div>
+                  <p className="mt-1 text-foreground/90">{it.reason}</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Suggested: <span className="font-medium text-foreground/80">{it.recommendedAction}</span>
+                  </p>
+                </div>
+              </Link>
+            </li>
+          ))}
+        </ul>
+        {items.length > 10 && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Showing 10 of {items.length} items.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AttentionSeverityBadge({ severity }: { severity: AttentionItemDto['severity'] }) {
+  const tone = severity === 'critical' ? 'danger' :
+               severity === 'high'     ? 'warning' :
+               severity === 'medium'   ? 'info'    :
+                                         'muted';
+  return <Badge tone={tone} className="shrink-0 text-[10px] uppercase">{severity}</Badge>;
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
 }
 
 function BoardCard({

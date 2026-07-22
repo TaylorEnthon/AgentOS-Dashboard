@@ -289,14 +289,24 @@ function StatusBadge({ status }: { status: EffectiveExecutionStatus }) {
 function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
   const [snap, setSnap] = useState<import('../lib/api').LifecycleSnapshotDto | null>(null);
   const [conflict, setConflict] = useState<LifecycleConflictDto | null>(null);
+  const [health, setHealth] = useState<{
+    score: import('../lib/api').LifecycleHealthScoreDto;
+    explanation: import('../lib/api').LifecycleExplanationDto;
+  } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = () => {
     Promise.all([
       api.executionLifecycle(executionId),
       api.executionConflict(executionId),
+      api.executionHealth(executionId),
     ])
-      .then(([s, c]) => { setSnap(s); setConflict(c); setErr(null); })
+      .then(([s, c, h]) => {
+        setSnap(s);
+        setConflict(c);
+        setHealth(h);
+        setErr(null);
+      })
       .catch((e) => setErr(String(e)));
   };
 
@@ -388,10 +398,64 @@ function LifecycleSnapshotCard({ executionId }: { executionId: string }) {
                 ))}
               </ul>
             )}
+
+            {/* v1.3: Health + Explanation */}
+            {health && <HealthBlock health={health} />}
           </div>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function HealthBlock({ health }: {
+  health: { score: import('../lib/api').LifecycleHealthScoreDto; explanation: import('../lib/api').LifecycleExplanationDto };
+}) {
+  const scoreTone =
+    health.score.level === 'healthy'   ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' :
+    health.score.level === 'warning'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                         'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300';
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs uppercase tracking-wider text-muted-foreground">Health:</span>
+        <span className={cn('rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums', scoreTone)}>
+          {health.score.score}
+        </span>
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+          {health.score.level}
+        </span>
+      </div>
+      <p className="text-sm text-foreground/90">{health.explanation.headline}</p>
+      {health.explanation.bullets.length > 0 && (
+        <ul className="list-inside list-disc space-y-0.5 text-xs text-muted-foreground">
+          {health.explanation.bullets.map((b, idx) => (
+            <li key={idx}>{b}</li>
+          ))}
+        </ul>
+      )}
+      {health.score.factors.length > 0 && (
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer text-[10px] uppercase tracking-wider">
+            {health.score.factors.length} factors
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {health.score.factors.map((f, idx) => (
+              <li key={idx} className="flex items-baseline gap-2">
+                <span className="font-mono text-[10px]">{f.name}</span>
+                <span className="text-foreground/80">— {f.reason}</span>
+                <span className={cn(
+                  'ml-auto text-[10px] tabular-nums',
+                  f.impact > 0 ? 'text-emerald-600' : f.impact < 0 ? 'text-rose-600' : '',
+                )}>
+                  {f.impact > 0 ? '+' : ''}{f.impact}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
   );
 }
 

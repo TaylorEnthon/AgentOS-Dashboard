@@ -21,6 +21,12 @@ import {
   scopeEventsToExecution,
   subscribeLifecycleInvalidation,
 } from './lifecycle-runtime.js';
+import {
+  buildAttentionQueue,
+  computeHealthScore,
+  computeWorkspaceSummary,
+  explainLifecycle,
+} from './lifecycle-health.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -732,6 +738,149 @@ export function registerRoutes(
       out[id] = detectLifecycleConflict(id, snapshot, manual);
     }
     return out;
+  });
+
+  /* ---------------- v1.3: Agent Health Intelligence ---------------- */
+
+  // v1.3-a: per-execution health score + explanation.
+  app.get<{ Params: { id: string } }>('/api/executions/:id/health', async (req, reply) => {
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    const indexStr = req.params.id.slice(lastColon + ':exec-'.length);
+    const execIndex = Number.parseInt(indexStr, 10);
+    if (!Number.isFinite(execIndex) || execIndex < 0) {
+      return reply.code(400).send({ error: 'malformed execution index' });
+    }
+    const s = db.getSession(sessionId);
+    if (!s) return reply.code(404).send({ error: 'session not found' });
+
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const scopedEvents = scopeEventsToExecution(events, execIndex);
+    const commits = await fetchSessionCommits(s);
+    const { snapshot } = computeAndCacheLifecycle(req.params.id, {
+      events: scopedEvents,
+      commits,
+      startTime: s.start_time,
+      endTime: s.end_time ?? null,
+    });
+    const manual = db.getExecutionMetadata(req.params.id)?.manualStatus ?? null;
+    const conflict = detectLifecycleConflict(req.params.id, snapshot, manual);
+    const score = computeHealthScore({ snapshot, conflict });
+    const explanation = explainLifecycle(snapshot, conflict);
+    return { score, explanation };
+  });
+
+  // v1.3-b: batch health for Workspace Board.
+  app.post<{ Body: { ids?: string[] } }>('/api/health/batch', async (req) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body!.ids.slice(0, 500) : [];
+    const out: Record<string, import('@agentos/shared').LifecycleHealthScore> = {};
+    if (ids.length === 0) return out;
+
+    for (const id of ids) {
+      const lastColon = id.lastIndexOf(':exec-');
+      if (lastColon < 0) continue;
+      const sessionId = id.slice(0, lastColon);
+      const s = db.getSession(sessionId);
+      if (!s) continue;
+      const indexStr = id.slice(lastColon + ':exec-'.length);
+      const execIndex = Number.parseInt(indexStr, 10);
+      if (!Number.isFinite(execIndex) || execIndex < 0) continue;
+      const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const scopedEvents = scopeEventsToExecution(events, execIndex);
+      const commits = await fetchSessionCommits(s);
+      const { snapshot } = computeAndCacheLifecycle(id, {
+        events: scopedEvents,
+        commits,
+        startTime: s.start_time,
+        endTime: s.end_time ?? null,
+      });
+      const manual = db.getExecutionMetadata(id)?.manualStatus ?? null;
+      const conflict = detectLifecycleConflict(id, snapshot, manual);
+      out[id] = computeHealthScore({ snapshot, conflict });
+    }
+    return out;
+  });
+
+  // v1.3-c: Attention Queue — top N items the user should look at.
+  app.get<{ Querystring: { limit?: string } }>('/api/attention', async (req) => {
+    const lim = Math.max(1, Math.min(req.query.limit ? Number(req.query.limit) : 50, 200));
+    const allExecs = db.listSessions({ limit: 1000 });
+    type AttentionInputs = Parameters<typeof buildAttentionQueue>[0];
+    const inputs: AttentionInputs = [];
+    for (const s of allExecs) {
+      const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const groups = groupEventsIntoExecutions(events);
+      for (let i = 0; i < groups.length; i++) {
+        const execId = `${s.id}:exec-${i}`;
+        const scoped = scopeEventsToExecution(events, i);
+        const commits = await fetchSessionCommits(s);
+        const { snapshot } = computeAndCacheLifecycle(execId, {
+          events: scoped,
+          commits,
+          startTime: s.start_time,
+          endTime: s.end_time ?? null,
+        });
+        const manual = db.getExecutionMetadata(execId)?.manualStatus ?? null;
+        const conflict = detectLifecycleConflict(execId, snapshot, manual);
+        inputs.push({ executionId: execId, snapshot, conflict });
+      }
+    }
+    return buildAttentionQueue(inputs).slice(0, lim);
+  });
+
+  // v1.3-d: Workspace Health Summary — aggregate counts + longest running.
+  app.get('/api/workspace/summary', async () => {
+    // Build inputs for summary: every visible execution + its health score.
+    type Exec = {
+      executionId: string;
+      startedAt: string;
+      durationMs: number;
+      derivedStatus: import('@agentos/shared').DerivedLifecycleStatus;
+    };
+    const executions: Exec[] = [];
+    const healthInputs: Array<{ executionId: string; score: import('@agentos/shared').LifecycleHealthScore }> = [];
+    const conflictInputs: Array<{ executionId: string; isConflict: boolean }> = [];
+
+    for (const s of db.listSessions({ limit: 1000 })) {
+      const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+      const groups = groupEventsIntoExecutions(events);
+      for (let i = 0; i < groups.length; i++) {
+        const execId = `${s.id}:exec-${i}`;
+        const scoped = scopeEventsToExecution(events, i);
+        const commits = await fetchSessionCommits(s);
+        const { snapshot } = computeAndCacheLifecycle(execId, {
+          events: scoped,
+          commits,
+          startTime: s.start_time,
+          endTime: s.end_time ?? null,
+        });
+        // Per-execution duration in ms from execution's events
+        const startMs = Date.parse(groups[i]!.startTime);
+        const endMs = Date.parse(groups[i]!.endTime);
+        const durationMs = Number.isFinite(startMs) && Number.isFinite(endMs)
+          ? Math.max(0, endMs - startMs)
+          : 0;
+        executions.push({
+          executionId: execId,
+          startedAt: groups[i]!.startTime,
+          durationMs,
+          derivedStatus: snapshot.derivedStatus,
+        });
+        const manual = db.getExecutionMetadata(execId)?.manualStatus ?? null;
+        const conflict = detectLifecycleConflict(execId, snapshot, manual);
+        healthInputs.push({
+          executionId: execId,
+          score: computeHealthScore({ snapshot, conflict }),
+        });
+        conflictInputs.push({ executionId: execId, isConflict: conflict.isConflict });
+      }
+    }
+    return computeWorkspaceSummary({
+      executions,
+      health: healthInputs,
+      conflicts: conflictInputs,
+    });
   });
 
   /* ---------------- v0.6 Git integration ---------------- */

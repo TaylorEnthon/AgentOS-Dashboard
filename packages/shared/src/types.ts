@@ -631,6 +631,108 @@ export interface LifecycleChangedPayload {
   reason: string;
 }
 
+/* ---------------- v1.3: Agent Health Intelligence ---------------- */
+
+/**
+ * Three-bucket overall health. Score thresholds (configurable):
+ *   - score >= 80  -> healthy
+ *   - score >= 50  -> warning
+ *   - score <  50  -> critical
+ */
+export type HealthLevel = 'healthy' | 'warning' | 'critical';
+
+/**
+ * One positive or negative contributor to the health score. `impact`
+ * is signed (positive = healthier, negative = drag). Order in the
+ * `factors[]` array is descending by absolute impact, so the UI can
+ * render top contributors first.
+ */
+export interface HealthFactor {
+  name: string;
+  impact: number;
+  reason: string;
+}
+
+/**
+ * Read-only health assessment for a single execution.
+ * Pure function over LifecycleSnapshot + LifecycleConflict.
+ */
+export interface LifecycleHealthScore {
+  /** Integer 0..100. */
+  score: number;
+  level: HealthLevel;
+  factors: HealthFactor[];
+}
+
+/**
+ * Human-readable explanation of a lifecycle state. `bullets[]` is
+ * ordered by importance. Always returns at least one bullet.
+ */
+export interface LifecycleExplanation {
+  /** One-line summary suitable for a card header. */
+  headline: string;
+  /** Concise reasons, in priority order. */
+  bullets: string[];
+}
+
+/**
+ * Severity of an Attention Queue item. Sort order (asc): low < medium < high < critical.
+ */
+export type AttentionSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+/**
+ * Suggested user action for an attention item. The action is a hint,
+ * NOT auto-executed.
+ */
+export type AttentionAction =
+  | 'review-conflict'      // manualStatus disagrees with derivedStatus
+  | 'investigate-blocked'  // derived is blocked (recent commit + stale)
+  | 'restart-or-abandon'   // derived is failed or stuck a long time
+  | 'archive'              // very old, no movement
+  | 'confirm-completion'   // manual=done but no end_time / commit
+  | 'monitor'              // generic — keep an eye on it
+  ;
+
+/**
+ * One item in the Attention Queue. Read-only — never auto-executes.
+ */
+export interface AttentionItem {
+  executionId: string;
+  severity: AttentionSeverity;
+  reason: string;
+  recommendedAction: AttentionAction;
+  /** Snapshot derivedStatus (so UI can show icon without re-fetching). */
+  derivedStatus: DerivedLifecycleStatus | null;
+  /** When the underlying situation was first observed (ISO). null if unknown. */
+  detectedAt: string | null;
+  /** Health score if computed (omitted when inputs missing). */
+  healthScore?: number;
+  /** Health level if computed. */
+  healthLevel?: HealthLevel;
+}
+
+/**
+ * Workspace-level summary aggregated across every visible execution.
+ */
+export interface WorkspaceHealthSummary {
+  healthy: number;
+  warning: number;
+  critical: number;
+  /** Manual-vs-derived conflicts across all visible executions. */
+  conflictCount: number;
+  /** The execution with the longest active duration (running/idle), or null. */
+  longestRunning: {
+    executionId: string;
+    startedAt: string;
+    durationMs: number;
+    derivedStatus: DerivedLifecycleStatus;
+  } | null;
+  /** Total executions summarized. */
+  total: number;
+  /** When this summary was computed. */
+  computedAt: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

@@ -404,6 +404,63 @@ export interface LifecycleConflictDto {
   label: string | null;
 }
 
+/* ---------------- v1.3: Agent Health Intelligence ---------------- */
+
+export type HealthLevel = 'healthy' | 'warning' | 'critical';
+
+export interface HealthFactorDto {
+  name: string;
+  impact: number;
+  reason: string;
+}
+
+export interface LifecycleHealthScoreDto {
+  score: number;
+  level: HealthLevel;
+  factors: HealthFactorDto[];
+}
+
+export interface LifecycleExplanationDto {
+  headline: string;
+  bullets: string[];
+}
+
+export type AttentionSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export type AttentionAction =
+  | 'review-conflict'
+  | 'investigate-blocked'
+  | 'restart-or-abandon'
+  | 'archive'
+  | 'confirm-completion'
+  | 'monitor';
+
+export interface AttentionItemDto {
+  executionId: string;
+  severity: AttentionSeverity;
+  reason: string;
+  recommendedAction: AttentionAction;
+  derivedStatus: DerivedLifecycleStatus | null;
+  detectedAt: string | null;
+  healthScore?: number;
+  healthLevel?: HealthLevel;
+}
+
+export interface WorkspaceHealthSummaryDto {
+  healthy: number;
+  warning: number;
+  critical: number;
+  conflictCount: number;
+  longestRunning: {
+    executionId: string;
+    startedAt: string;
+    durationMs: number;
+    derivedStatus: DerivedLifecycleStatus;
+  } | null;
+  total: number;
+  computedAt: string;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -539,4 +596,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ids }),
     }),
+  // v1.3: Agent Health Intelligence
+  executionHealth: (id: string) =>
+    http<{ score: LifecycleHealthScoreDto; explanation: LifecycleExplanationDto }>(
+      `/api/executions/${encodeURIComponent(id)}/health`,
+    ),
+  healthBatch: (ids: string[]) =>
+    http<Record<string, LifecycleHealthScoreDto>>('/api/health/batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+  attentionQueue: (limit?: number) =>
+    http<AttentionItemDto[]>(`/api/attention${limit != null ? `?limit=${limit}` : ''}`),
+  workspaceSummary: () =>
+    http<WorkspaceHealthSummaryDto>('/api/workspace/summary'),
 };
