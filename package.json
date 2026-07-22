@@ -1,0 +1,23 @@
+{
+  "name": "agentos-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local AI Agent ops & intelligence dashboard (Claude Code / Codex / Grok / Gemini / Hermes).",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -ws --if-present",
+    "build:backend": "npm run build -w @agentos/backend",
+    "build:frontend": "npm run build -w @agentos/frontend",
+    "build:shared": "npm run build -w @agentos/shared",
+    "build:collectors": "npm run build -w @agentos/collectors",
+    "dev": "npm run dev -w @agentos/backend",
+    "start": "npm run start -w @agentos/backend",
+    "test": "npm run test -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,28 @@
+node_modules/
+dist/
+build/
+.cache/
+.turbo/
+coverage/
+
+# Runtime data
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.*.local
