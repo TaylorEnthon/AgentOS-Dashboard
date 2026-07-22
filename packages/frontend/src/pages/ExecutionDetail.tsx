@@ -101,6 +101,9 @@ export function ExecutionDetailPage() {
         </CardContent>
       </Card>
 
+      {/* v1.0: Lifecycle Timeline — manual status changes (and future auto). */}
+      <LifecycleTimeline executionId={data.id} />
+
       {/* Commits produced by this execution */}
       <Card>
         <CardHeader>
@@ -283,6 +286,104 @@ interface WorkspaceFormState {
   note: string;
   tagsRaw: string;
   manualStatus: '' | ManualExecutionStatus;
+}
+
+/* ---------------- v1.0: Lifecycle Timeline ---------------- */
+
+function LifecycleTimeline({ executionId }: { executionId: string }) {
+  const [history, setHistory] = useState<import('../lib/api').ExecutionStatusHistoryDto[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.executionHistory(executionId)
+      .then(setHistory)
+      .catch((e) => setErr(String(e)));
+  }, [executionId]);
+
+  // Also re-fetch when the WorkspaceEditor saves (parent state flips).
+  // Cheap: history rarely grows past a few rows.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      api.executionHistory(executionId)
+        .then(setHistory)
+        .catch(() => undefined);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [executionId, history.length]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Lifecycle Timeline</CardTitle>
+        <CardDescription>
+          Status changes for this execution. Currently we only record
+          manual changes (from the Workspace editor); auto-derived
+          status shifts will appear here in a later release.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && history.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No status changes recorded yet. Use the Workspace editor
+            above to set a manual status — every change appears here.
+          </p>
+        )}
+        {history.length > 0 && (
+          <ol className="space-y-0">
+            {history.map((h, i) => (
+              <li key={h.id} className="flex gap-3">
+                <div className="flex flex-col items-center">
+                  <span className={cn(
+                    'mt-1.5 h-2.5 w-2.5 rounded-full',
+                    h.source === 'manual' ? 'bg-primary' : 'bg-muted-foreground/40',
+                  )} />
+                  {i < history.length - 1 && (
+                    <span className="min-h-[24px] w-px flex-1 bg-border" />
+                  )}
+                </div>
+                <div className="flex-1 pb-3">
+                  <div className="flex flex-wrap items-baseline gap-2 text-xs">
+                    <time
+                      className="font-mono tabular-nums text-muted-foreground"
+                      dateTime={h.createdAt}
+                      title={h.createdAt}
+                    >
+                      {formatClock(h.createdAt)}
+                    </time>
+                    {h.fromStatus ? (
+                      <>
+                        <StatusBadge status={h.fromStatus} />
+                        <span className="text-muted-foreground">→</span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">initial</span>
+                    )}
+                    <StatusBadge status={h.toStatus} />
+                    {h.source === 'manual' && (
+                      <span className="text-[10px] uppercase tracking-wider text-primary/70">manual</span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-muted-foreground/70">
+                    {formatRelative(h.createdAt)}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatClock(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString([], {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
 }
 
 function WorkspaceEditor({

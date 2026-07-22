@@ -562,7 +562,36 @@ export function registerRoutes(
       tags,
       manualStatus,
     });
+    // v1.0: append a history row when manualStatus actually changes.
+    // Same status -> skip (otherwise the timeline fills with duplicates).
+    const beforeManual = db.getExecutionMetadata(req.params.id);
+    // (beforeManual is the row BEFORE upsert; we captured its effectiveStatus above.
+    // To avoid double-reading, re-fetch only when status might have changed:)
+    const prevBefore = db.raw.prepare(
+      `SELECT manual_status FROM execution_metadata WHERE execution_id = ?`,
+    ).get(req.params.id) as { manual_status: string | null } | undefined;
+    void beforeManual; // (kept for symmetry with future audit; harmless)
+    if (b.manualStatus !== undefined && prevBefore?.manual_status !== updated.manualStatus) {
+      const fromStatus = (prevBefore?.manual_status ?? null) as
+        import('@agentos/shared').EffectiveExecutionStatus | null;
+      const toStatus = (updated.manualStatus ?? 'unknown') as
+        import('@agentos/shared').EffectiveExecutionStatus;
+      db.recordStatusChange(req.params.id, fromStatus, toStatus, 'manual');
+    }
     return updated;
+  });
+
+  /* ---------------- v1.0: Execution Status History ---------------- */
+
+  // v1.0-a: read transition log for one execution (oldest-first)
+  app.get<{ Params: { id: string } }>('/api/executions/:id/history', async (req, reply) => {
+    const lastColon = req.params.id.lastIndexOf(':exec-');
+    if (lastColon < 0) return reply.code(400).send({ error: 'malformed execution id' });
+    const sessionId = req.params.id.slice(0, lastColon);
+    if (!db.getSession(sessionId)) {
+      return reply.code(404).send({ error: 'session not found' });
+    }
+    return db.getExecutionStatusHistory(req.params.id, 200);
   });
 
   /* ---------------- v0.6 Git integration ---------------- */

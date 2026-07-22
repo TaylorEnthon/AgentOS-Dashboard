@@ -446,6 +446,76 @@ export interface ExecutionMetadataPatch {
   manualStatus?: ManualExecutionStatus | null;
 }
 
+/* ---------------- v1.0: Execution Board & Lifecycle ---------------- */
+
+/**
+ * Six-column Board categorization. The frontend maps:
+ *   - manualStatus wins (its column = the manual status itself)
+ *   - else derived maps: running -> running, unknown -> todo, completed -> done
+ */
+export type ExecutionBoardColumn =
+  | 'todo'
+  | 'in-progress'
+  | 'running'
+  | 'blocked'
+  | 'done'
+  | 'archived';
+
+/**
+ * Where a status transition came from:
+ *   - `manual`  user PATCHed execution_metadata
+ *   - `auto`    the engine re-derived it from activity
+ *
+ * v1.0 only writes `manual` rows. The `auto` variant is reserved for
+ * future background jobs that detect real status drift; we don't
+ * auto-record to avoid filling history with no-op transitions.
+ */
+export type ExecutionStatusHistorySource = 'auto' | 'manual';
+
+/**
+ * Append-only log of every manual (and later, auto) change to an
+ * execution's effective status. Used by the Lifecycle Timeline UI on
+ * the ExecutionDetail page.
+ */
+export interface ExecutionStatusHistory {
+  id: number;
+  executionId: string;
+  /** Previous status (`null` for the very first record). */
+  fromStatus: EffectiveExecutionStatus | null;
+  /** New status. */
+  toStatus: EffectiveExecutionStatus;
+  source: ExecutionStatusHistorySource;
+  createdAt: string;
+}
+
+/**
+ * One row in the Board. The frontend derives `boardColumn` from
+ * `effectiveStatus` + `manualStatus`; we still model it explicitly so
+ * the Kanban column bucketing logic is documented in the type.
+ */
+export interface ExecutionBoardItem {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  agentType: AgentType;
+  project: string;
+  projectDisplay: string;
+  displayName?: string | null;
+  title?: string | null;
+  tags: string[];
+  manualStatus?: ManualExecutionStatus | null;
+  effectiveStatus: EffectiveExecutionStatus;
+  startTime: string;
+  endTime?: string | null;
+  durationMs: number;
+  eventCount: number;
+  tokenUsage: number;
+  cost: number;
+  commits: GitCommitInfo[];
+  /** Which column this card lands in. */
+  boardColumn: ExecutionBoardColumn;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

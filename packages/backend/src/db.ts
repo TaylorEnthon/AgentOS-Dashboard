@@ -6,6 +6,9 @@ import type {
   AgentType,
   ActivityEvent,
   ExecutionMetadata,
+  ExecutionStatusHistory,
+  ExecutionStatusHistorySource,
+  EffectiveExecutionStatus,
   ManualExecutionStatus,
   Project,
   UsageRecord,
@@ -103,6 +106,15 @@ export interface ExecutionMetadataRow {
   manual_status: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ExecutionStatusHistoryRow {
+  id: number;
+  execution_id: string;
+  from_status: string | null;
+  to_status: string;
+  source: string;
+  created_at: string;
 }
 
 export interface IngestionFileRow {
@@ -235,6 +247,24 @@ CREATE TABLE IF NOT EXISTS execution_metadata (
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
+
+/*
+ * v1.0: append-only log of every manual (and later, auto) status
+ * change for an execution. Drives the Lifecycle Timeline UI on
+ * ExecutionDetail. We deliberately do NOT FK to execution_metadata —
+ * the history row must outlive its metadata row (so deleting the
+ * metadata doesn't drop the audit trail).
+ */
+CREATE TABLE IF NOT EXISTS execution_status_history (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_id TEXT NOT NULL,
+  from_status  TEXT,         -- nullable: first record has no "from"
+  to_status    TEXT NOT NULL,
+  source       TEXT NOT NULL, -- ExecutionStatusHistorySource enum
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_status_history_exec
+  ON execution_status_history (execution_id, id);
 
 CREATE TABLE IF NOT EXISTS ingestion_files (
   id TEXT PRIMARY KEY,
@@ -630,6 +660,42 @@ export class Db {
     this.raw.prepare(`DELETE FROM execution_metadata WHERE execution_id = ?`).run(executionId);
   }
 
+  // ---------------- v1.0: Execution Status History ----------------
+
+  /**
+   * Append one transition to the history log. Caller is responsible
+   * for de-duplication (skip if from===to) and for picking the right
+   * `source`. We do not validate `toStatus` here — `rowToStatusHistory`
+   * will clamp unknown values to a safe fallback at read time.
+   */
+  recordStatusChange(
+    executionId: string,
+    fromStatus: EffectiveExecutionStatus | null,
+    toStatus: EffectiveExecutionStatus,
+    source: ExecutionStatusHistorySource,
+    nowIso: string = new Date().toISOString(),
+  ): void {
+    this.raw.prepare(
+      `INSERT INTO execution_status_history (execution_id, from_status, to_status, source, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(executionId, fromStatus, toStatus, source, nowIso);
+  }
+
+  /**
+   * Read the transition log for one execution, ordered oldest-first
+   * so the UI can render a top-to-bottom timeline.
+   */
+  getExecutionStatusHistory(executionId: string, limit = 200): ExecutionStatusHistory[] {
+    const cap = Math.max(1, Math.min(limit, 1000));
+    const rows = this.raw.prepare(
+      `SELECT * FROM execution_status_history
+       WHERE execution_id = ?
+       ORDER BY id ASC
+       LIMIT ?`,
+    ).all(executionId, cap) as ExecutionStatusHistoryRow[];
+    return rows.map(rowToStatusHistory);
+  }
+
   /**
    * v0.5 timeline projection: `activity_events ⨝ sessions`, optionally
    * filtered. Always ordered newest-first so the UI's "scroll to bottom
@@ -1016,6 +1082,40 @@ export function rowToExecutionMetadata(row: ExecutionMetadataRow): ExecutionMeta
     manualStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * v1.0: Map a raw status_history row to the shared shape. Defensive
+ * against garbage `from_status` / `to_status` values — the latter is
+ * clamped to `unknown` so the API never returns an invalid enum value.
+ * `from_status` null is legitimate (first transition).
+ */
+export function rowToStatusHistory(row: ExecutionStatusHistoryRow): ExecutionStatusHistory {
+  const validStatuses = new Set<EffectiveExecutionStatus>([
+    'running', 'completed', 'unknown',
+    'todo', 'in-progress', 'done', 'blocked', 'archived',
+  ]);
+  const validSources = new Set<ExecutionStatusHistorySource>(['auto', 'manual']);
+  const fromStatus: EffectiveExecutionStatus | null =
+    row.from_status && validStatuses.has(row.from_status as EffectiveExecutionStatus)
+      ? (row.from_status as EffectiveExecutionStatus)
+      : null;
+  const toStatus: EffectiveExecutionStatus =
+    validStatuses.has(row.to_status as EffectiveExecutionStatus)
+      ? (row.to_status as EffectiveExecutionStatus)
+      : 'unknown';
+  const source: ExecutionStatusHistorySource =
+    validSources.has(row.source as ExecutionStatusHistorySource)
+      ? (row.source as ExecutionStatusHistorySource)
+      : 'auto';
+  return {
+    id: row.id,
+    executionId: row.execution_id,
+    fromStatus,
+    toStatus,
+    source,
+    createdAt: row.created_at,
   };
 }
 

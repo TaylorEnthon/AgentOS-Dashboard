@@ -10,11 +10,13 @@ import { SessionsPage } from './pages/Sessions';
 import { SessionDetailPage } from './pages/SessionDetail';
 import { ExecutionsPage } from './pages/Executions';
 import { ExecutionDetailPage } from './pages/ExecutionDetail';
+import { WorkspacePage } from './pages/Workspace';
 import { cn } from './lib/format';
 
 const NAV = [
   { to: '/', label: 'Overview', end: true },
   { to: '/sessions', label: 'Sessions' },
+  { to: '/workspace', label: 'Workspace' },
   { to: '/executions', label: 'Executions' },
   { to: '/timeline', label: 'Timeline' },
   { to: '/agents', label: 'Agents' },
@@ -31,7 +33,7 @@ export function App() {
           <div className="grid h-8 w-8 place-items-center rounded-md bg-primary text-primary-foreground font-bold">A</div>
           <div>
             <div className="font-semibold leading-tight">AgentOS</div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v0.9</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Dashboard v1.0</div>
           </div>
         </div>
         <nav className="flex flex-col gap-1">
@@ -61,6 +63,7 @@ export function App() {
           <Route path="/" element={<OverviewPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
+          <Route path="/workspace" element={<WorkspacePage />} />
           <Route path="/executions" element={<ExecutionsPage />} />
           <Route path="/executions/:id" element={<ExecutionDetailPage />} />
           <Route path="/timeline" element={<TimelinePage />} />

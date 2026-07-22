@@ -333,6 +333,28 @@ export interface ExecutionMetadataPatch {
   manualStatus?: ManualExecutionStatus | null;
 }
 
+/* ---------------- v1.0: Execution Board & Lifecycle ---------------- */
+
+export type ExecutionBoardColumn =
+  | 'todo'
+  | 'in-progress'
+  | 'running'
+  | 'blocked'
+  | 'done'
+  | 'archived';
+
+export type ExecutionStatusHistorySource = 'auto' | 'manual';
+
+/** One transition in an Execution's lifecycle. */
+export interface ExecutionStatusHistoryDto {
+  id: number;
+  executionId: string;
+  fromStatus: EffectiveExecutionStatus | null;
+  toStatus: EffectiveExecutionStatus;
+  source: ExecutionStatusHistorySource;
+  createdAt: string;
+}
+
 export interface SessionMetadataPatch {
   displayName?: string | null;
   note?: string | null;
@@ -447,4 +469,8 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+
+  // v1.0: Execution Board & Lifecycle
+  executionHistory: (id: string) =>
+    http<ExecutionStatusHistoryDto[]>(`/api/executions/${encodeURIComponent(id)}/history`),
 };
