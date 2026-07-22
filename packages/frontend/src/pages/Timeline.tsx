@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   api,
   type AgentStatusDto,
@@ -364,6 +364,18 @@ function TimelineRow({ item }: { item: TimelineItemDto }) {
             <>
               <span>·</span>
               <span className="truncate" title={item.sessionTitle}>{item.sessionTitle}</span>
+            </>
+          )}
+          {item.sessionId && item.type !== 'git-commit' && (
+            <>
+              <span>·</span>
+              <Link
+                to={`/sessions/${encodeURIComponent(item.sessionId)}`}
+                className="text-primary hover:underline"
+                onClick={(e) => e.stopPropagation()}
+              >
+                session →
+              </Link>
             </>
           )}
         </div>

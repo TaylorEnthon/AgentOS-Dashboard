@@ -289,6 +289,45 @@ export interface GitSessionInfo {
   reason?: string;
 }
 
+/* ---------------- v0.7: Session Management ---------------- */
+
+/**
+ * User-owned session metadata. The `sessions` table is read-only
+ * from AgentOS's perspective (collectors own it), so all custom
+ * user data lives in this separate table, keyed by `session_id`.
+ */
+export interface SessionMetadata {
+  sessionId: string;
+  displayName?: string | null;
+  note?: string | null;
+  /** JSON array of strings; stored as text in SQLite. */
+  tags: string[];
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Partial update body for `PATCH /api/sessions/:id/metadata`. */
+export interface SessionMetadataPatch {
+  displayName?: string | null;
+  note?: string | null;
+  tags?: string[];
+  pinned?: boolean;
+}
+
+/**
+ * Returned by `GET /api/sessions/:id/resume`. Pure projection — the
+ * command is generated, never executed.
+ */
+export interface ResumeCommand {
+  agent: AgentType;
+  command: string;
+  /** The id the CLI actually accepts (usually `externalId`). */
+  externalId: string;
+  /** Free-form notes about how to use the command. */
+  notes?: string;
+}
+
 /** Pick the worse of two confidence levels. */
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;

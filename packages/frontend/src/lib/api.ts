@@ -218,6 +218,52 @@ export interface GitSessionInfoDto {
   reason?: string;
 }
 
+/* ---------------- v0.7: Session Management ---------------- */
+
+export interface SessionListItemDto extends SessionDto {
+  displayName?: string | null;
+  note?: string | null;
+  tags: string[];
+  pinned: boolean;
+  metadataCreatedAt?: string;
+  metadataUpdatedAt?: string;
+  eventCount: number;
+  usageTokens: number;
+  usageCost: number;
+}
+
+export interface SessionV2DetailDto extends SessionListItemDto {
+  /** Full metadata row from `session_metadata` (displayName/note/tags/pinned + timestamps). */
+  metadata: {
+    sessionId: string;
+    displayName?: string | null;
+    note?: string | null;
+    tags: string[];
+    pinned: boolean;
+    createdAt?: string;
+    updatedAt: string;
+  } | null;
+  /** Computed duration: end - start (or now - start if still running). */
+  durationMs: number | null;
+  git: GitSessionInfoDto | null;
+  usage: SessionDetailDto['usage'];
+  events: SessionDetailDto['events'];
+}
+
+export interface SessionResumeDto {
+  agent: AgentType;
+  command: string;
+  externalId: string;
+  notes?: string;
+}
+
+export interface SessionMetadataPatch {
+  displayName?: string | null;
+  note?: string | null;
+  tags?: string[];
+  pinned?: boolean;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -265,4 +311,31 @@ export const api = {
 
   // v0.6
   gitSessionCommits: (id: string) => http<GitSessionInfoDto>(`/api/git/sessions/${encodeURIComponent(id)}`),
+
+  // v0.7: Session Management
+  sessionsV2: (params: { agent?: string; project?: string; search?: string; status?: string; pinned?: string | boolean; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === undefined || v === '') return;
+      q.set(k, String(v));
+    });
+    const qs = q.toString();
+    return http<SessionListItemDto[]>(`/api/sessions-v2${qs ? `?${qs}` : ''}`);
+  },
+  sessionV2: (id: string) => http<SessionV2DetailDto>(`/api/sessions-v2/${encodeURIComponent(id)}`),
+  patchSessionMetadata: (id: string, patch: SessionMetadataPatch) =>
+    http<{
+      sessionId: string;
+      displayName?: string | null;
+      note?: string | null;
+      tags: string[];
+      pinned: boolean;
+      createdAt?: string;
+      updatedAt: string;
+    }>(`/api/sessions-v2/${encodeURIComponent(id)}/metadata`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  sessionResume: (id: string) =>
+    http<SessionResumeDto>(`/api/sessions-v2/${encodeURIComponent(id)}/resume`),
 };

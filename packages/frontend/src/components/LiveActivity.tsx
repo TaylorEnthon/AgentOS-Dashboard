@@ -185,8 +185,9 @@ function AgentStatusRow({ row }: { row: AgentStatusDto }) {
     row.status === 'active' ? 'bg-emerald-500' :
     row.status === 'idle' ? 'bg-amber-500' : 'bg-muted-foreground/40';
 
-  // Each row is a link to the full timeline filtered by this agent.
+  // Each row links to the timeline filtered by this agent.
   // v0.5: drill-down from Live → Timeline in one click.
+  // v0.7: also surfaces "view all sessions" for the agent.
   return (
     <li>
       <Link
@@ -211,8 +212,16 @@ function AgentStatusRow({ row }: { row: AgentStatusDto }) {
               </div>
             )}
             {row.lastActivity && (
-              <div className="mt-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                Updated {formatRelative(row.lastActivity)} · open timeline →
+              <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                <span>Updated {formatRelative(row.lastActivity)}</span>
+                <span className="text-primary normal-case">timeline →</span>
+                <Link
+                  to={`/sessions?agent=${encodeURIComponent(row.agent)}`}
+                  className="text-primary normal-case hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  all sessions →
+                </Link>
               </div>
             )}
           </div>

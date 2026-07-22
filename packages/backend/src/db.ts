@@ -11,6 +11,7 @@ import type {
   ConfidenceLevel,
   SourceMeta,
   TimelineItem,
+  SessionMetadata,
 } from '@agentos/shared';
 
 export interface AgentRow {
@@ -80,6 +81,16 @@ export interface EventRow {
   source_file: string | null;
   source_id: string | null;
   collected_at: string | null;
+}
+
+export interface SessionMetadataRow {
+  session_id: string;
+  display_name: string | null;
+  note: string | null;
+  tags: string | null;
+  pinned: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface IngestionFileRow {
@@ -177,6 +188,23 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+/**
+ * v0.7: user-owned metadata for sessions. NEVER write to the sessions
+ * table itself — all custom user data (display name, tags, pin, note)
+ * lives here so re-scanning collectors cannot clobber it. Created via
+ * the same idempotent IF NOT EXISTS pattern as everything else, so
+ * existing DBs pick it up on next Db(file) without a separate migration.
+ */
+CREATE TABLE IF NOT EXISTS session_metadata (
+  session_id   TEXT PRIMARY KEY,
+  display_name TEXT,
+  note         TEXT,
+  tags         TEXT,    -- JSON array of strings
+  pinned       INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_files (
@@ -425,6 +453,79 @@ export class Db {
     return this.raw.prepare(
       `SELECT * FROM activity_events WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?`,
     ).all(sessionId, limit) as EventRow[];
+  }
+
+  // ---------------- v0.7: Session Metadata ----------------
+
+  /** Read a single session's metadata, or null if not set. */
+  getSessionMetadata(sessionId: string): SessionMetadata | null {
+    const row = this.raw.prepare(
+      `SELECT * FROM session_metadata WHERE session_id = ?`,
+    ).get(sessionId) as SessionMetadataRow | undefined;
+    if (!row) return null;
+    return rowToMetadata(row);
+  }
+
+  /**
+   * Bulk-read metadata for many sessions in one round-trip. Returns
+   * a map keyed by sessionId so callers can LEFT-JOIN cheaply.
+   */
+  getSessionMetadataBulk(sessionIds: string[]): Map<string, SessionMetadata> {
+    const out = new Map<string, SessionMetadata>();
+    if (sessionIds.length === 0) return out;
+    const placeholders = sessionIds.map(() => '?').join(',');
+    const rows = this.raw.prepare(
+      `SELECT * FROM session_metadata WHERE session_id IN (${placeholders})`,
+    ).all(...sessionIds) as SessionMetadataRow[];
+    for (const r of rows) out.set(r.session_id, rowToMetadata(r));
+    return out;
+  }
+
+  /** Upsert (insert-or-replace) session metadata. */
+  upsertSessionMetadata(
+    sessionId: string,
+    patch: {
+      displayName?: string | null;
+      note?: string | null;
+      tags?: string[];
+      pinned?: boolean;
+    },
+  ): SessionMetadata {
+    const existing = this.getSessionMetadata(sessionId);
+    const now = new Date().toISOString();
+    const next: SessionMetadata = {
+      sessionId,
+      displayName: patch.displayName !== undefined ? patch.displayName : (existing?.displayName ?? null),
+      note:        patch.note        !== undefined ? patch.note        : (existing?.note        ?? null),
+      tags:        patch.tags        !== undefined ? patch.tags        : (existing?.tags        ?? []),
+      pinned:      patch.pinned      !== undefined ? !!patch.pinned    : (existing?.pinned      ?? false),
+      createdAt:   existing?.createdAt ?? now,
+      updatedAt:   now,
+    };
+    this.raw.prepare(
+      `INSERT INTO session_metadata (session_id, display_name, note, tags, pinned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         note         = excluded.note,
+         tags         = excluded.tags,
+         pinned       = excluded.pinned,
+         updated_at   = excluded.updated_at`,
+    ).run(
+      next.sessionId,
+      next.displayName,
+      next.note,
+      JSON.stringify(next.tags),
+      next.pinned ? 1 : 0,
+      next.createdAt,
+      next.updatedAt,
+    );
+    return next;
+  }
+
+  /** Delete user metadata for one session (no-op if absent). */
+  deleteSessionMetadata(sessionId: string): void {
+    this.raw.prepare(`DELETE FROM session_metadata WHERE session_id = ?`).run(sessionId);
   }
 
   /**
@@ -759,6 +860,29 @@ export class Db {
 
 // Re-export for convenience
 export type { SourceMeta };
+
+/** Map a raw session_metadata row to the shared SessionMetadata shape. */
+export function rowToMetadata(row: SessionMetadataRow): SessionMetadata {
+  let tags: string[] = [];
+  if (row.tags) {
+    try {
+      const parsed = JSON.parse(row.tags);
+      if (Array.isArray(parsed)) tags = parsed.filter((t): t is string => typeof t === 'string');
+    } catch {
+      // corrupted JSON — fall back to empty; user can re-edit
+      tags = [];
+    }
+  }
+  return {
+    sessionId: row.session_id,
+    displayName: row.display_name,
+    note: row.note,
+    tags,
+    pinned: row.pinned !== 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 /**
  * Format an activity_events row as a short human-readable action line

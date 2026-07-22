@@ -6,6 +6,7 @@ import type { SettingsStore } from './settings.js';
 import type { ConfidenceLevel } from '@agentos/shared';
 import { eventBus, type RealtimeEvent } from './event-bus.js';
 import { deriveAgentStatus, type AgentStatusRow } from './agent-status.js';
+import { buildResumeCommand } from './resume.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -133,6 +134,145 @@ export function registerRoutes(
       usage: db.listUsageForSession(row.id),
       events: db.listEventsForSession(row.id).map(rowToEventDto),
     };
+  });
+
+  /* ---------------- v0.7: Session Management ---------------- */
+
+  // v0.7-a: list with search/filter, now with metadata
+  app.get<{
+    Querystring: {
+      agent?: string;
+      project?: string;
+      search?: string;
+      status?: string;
+      pinned?: string;
+      limit?: string;
+    };
+  }>('/api/sessions-v2', async (req) => {
+    const { agent, project, search, status, pinned, limit } = req.query;
+    const lim = Math.max(1, Math.min(limit ? Number(limit) : 500, 1000));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (agent)   { where.push('s.agent_id = ?');    params.push(agent); }
+    if (project) { where.push('s.project = ?');     params.push(project); }
+    if (status)  { where.push('s.status = ?');      params.push(status); }
+    // search: project OR session metadata.display_name OR session.title
+    if (search && search.trim()) {
+      const like = `%${search.trim()}%`;
+      where.push(
+        `(s.project LIKE ? OR s.title LIKE ? OR sm.display_name LIKE ?)`,
+      );
+      params.push(like, like, like);
+    }
+    if (pinned === 'true' || pinned === '1') {
+      where.push('sm.pinned = 1');
+    } else if (pinned === 'false' || pinned === '0') {
+      where.push('(sm.pinned IS NULL OR sm.pinned = 0)');
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    // LEFT JOIN metadata so the search hits display_name; COUNT(event) for
+    // the timeline summary; SUM(usage) for tokens/cost.
+    const rows = db.raw.prepare(
+      `SELECT
+         s.*,
+         sm.display_name AS sm_display_name,
+         sm.note         AS sm_note,
+         sm.tags         AS sm_tags,
+         sm.pinned       AS sm_pinned,
+         sm.created_at   AS sm_created_at,
+         sm.updated_at   AS sm_updated_at,
+         (SELECT COUNT(*) FROM activity_events WHERE session_id = s.id) AS event_count,
+         (SELECT COALESCE(SUM(total_tokens), 0) FROM usage_records WHERE session_id = s.id) AS sum_tokens,
+         (SELECT COALESCE(SUM(estimated_cost), 0) FROM usage_records WHERE session_id = s.id) AS sum_cost
+       FROM sessions s
+       LEFT JOIN session_metadata sm ON sm.session_id = s.id
+       ${whereSql}
+       ORDER BY COALESCE(sm.pinned, 0) DESC, s.start_time DESC
+       LIMIT ${lim}`,
+    ).all(...params) as Array<import('./db.js').SessionRow & {
+      sm_display_name: string | null;
+      sm_note: string | null;
+      sm_tags: string | null;
+      sm_pinned: number | null;
+      sm_created_at: string | null;
+      sm_updated_at: string | null;
+      event_count: number;
+      sum_tokens: number;
+      sum_cost: number;
+    }>;
+    return rows.map((r) => withMetadataSummary(r, rowToSessionDto(r)));
+  });
+
+  // v0.7-b: detail (session + metadata + usage + events + git + resume)
+  app.get<{ Params: { id: string } }>('/api/sessions-v2/:id', async (req, reply) => {
+    const row = db.getSession(req.params.id);
+    if (!row) return reply.code(404).send({ error: 'session not found' });
+    const meta = db.getSessionMetadata(req.params.id);
+    const session = withMetadata(rowToSessionDto(row), meta);
+    // Pull git projection (read-only, optional). Don't fail the whole
+    // request if git log errors out.
+    let git: import('@agentos/shared').GitSessionInfo | null = null;
+    if (row.project_display || row.project) {
+      try {
+        const { getGitSessionInfo } = await import('./git-service.js');
+        git = await getGitSessionInfo(
+          row.project_display || row.project,
+          row.start_time,
+          row.end_time ?? undefined,
+        );
+      } catch {
+        git = { repo: null, commits: [], reason: 'git projection failed' };
+      }
+    }
+    return {
+      ...session,
+      metadata: meta,
+      durationMs: computeDurationMs(row.start_time, row.end_time),
+      git,
+      usage: db.listUsageForSession(row.id),
+      events: db.listEventsForSession(row.id).map(rowToEventDto),
+    };
+  });
+
+  // v0.7-c: PATCH metadata (rename / note / tags / pin)
+  app.patch<{ Params: { id: string }; Body: Partial<{
+    displayName?: string | null;
+    note?: string | null;
+    tags?: string[];
+    pinned?: boolean;
+  }> }>('/api/sessions-v2/:id/metadata', async (req, reply) => {
+    if (!db.getSession(req.params.id)) {
+      return reply.code(404).send({ error: 'session not found' });
+    }
+    const b = req.body ?? {};
+    // Sanitize tags: keep only non-empty strings, dedup, cap at 32
+    let tags: string[] | undefined;
+    if (Array.isArray(b.tags)) {
+      const seen = new Set<string>();
+      tags = [];
+      for (const t of b.tags) {
+        if (typeof t !== 'string') continue;
+        const trimmed = t.trim();
+        if (!trimmed || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        tags.push(trimmed);
+        if (tags.length >= 32) break;
+      }
+    }
+    const updated = db.upsertSessionMetadata(req.params.id, {
+      displayName: b.displayName === undefined ? undefined : (b.displayName || null),
+      note:        b.note        === undefined ? undefined : (b.note        || null),
+      tags,
+      pinned:      b.pinned      === undefined ? undefined :  b.pinned,
+    });
+    return updated;
+  });
+
+  // v0.7-d: resume command (read-only projection)
+  app.get<{ Params: { id: string } }>('/api/sessions-v2/:id/resume', async (req, reply) => {
+    const row = db.getSession(req.params.id);
+    if (!row) return reply.code(404).send({ error: 'session not found' });
+    return buildResumeCommand(row.agent_id.split(':')[0] as never, row.external_id);
   });
 
   /* ---------------- v0.6 Git integration ---------------- */
@@ -339,6 +479,82 @@ function fillDailyGaps(rows: Array<{ date: string; tokens: number; cost: number;
     out.push(map.get(k) ?? { date: k, tokens: 0, cost: 0, sessions: 0 });
   }
   return out;
+}
+
+/* ---------------- v0.7: Session Management helpers ---------------- */
+
+function parseTagsJson(s: string | null | undefined): string[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    if (Array.isArray(v)) return v.filter((t): t is string => typeof t === 'string');
+  } catch { /* fall through */ }
+  return [];
+}
+
+/** Merge metadata into a SessionDto. Sets `displayName` to metadata.displayName (or null), and copies tags + pinned. */
+function withMetadata(
+  s: ReturnType<typeof rowToSessionDto>,
+  m: import('@agentos/shared').SessionMetadata | null,
+): ReturnType<typeof rowToSessionDto> & {
+  displayName?: string | null;
+  tags: string[];
+  pinned: boolean;
+} {
+  return {
+    ...s,
+    displayName: m?.displayName ?? null,
+    tags: m?.tags ?? [],
+    pinned: m?.pinned ?? false,
+  };
+}
+
+/** Same as withMetadata but also folds in COUNT/SUM precomputed columns. */
+function withMetadataSummary(
+  r: import('./db.js').SessionRow & {
+    sm_display_name: string | null;
+    sm_note: string | null;
+    sm_tags: string | null;
+    sm_pinned: number | null;
+    sm_created_at: string | null;
+    sm_updated_at: string | null;
+    event_count: number;
+    sum_tokens: number;
+    sum_cost: number;
+  },
+  s: ReturnType<typeof rowToSessionDto>,
+): ReturnType<typeof rowToSessionDto> & {
+  displayName?: string | null;
+  tags: string[];
+  pinned: boolean;
+  note?: string | null;
+  metadataCreatedAt?: string;
+  metadataUpdatedAt?: string;
+  eventCount: number;
+  usageTokens: number;
+  usageCost: number;
+} {
+  return {
+    ...s,
+    displayName: r.sm_display_name,
+    note: r.sm_note,
+    tags: parseTagsJson(r.sm_tags),
+    pinned: (r.sm_pinned ?? 0) !== 0,
+    metadataCreatedAt: r.sm_created_at ?? undefined,
+    metadataUpdatedAt: r.sm_updated_at ?? undefined,
+    eventCount: r.event_count,
+    usageTokens: r.sum_tokens,
+    usageCost: r.sum_cost,
+  };
+}
+
+function computeDurationMs(startTime: string, endTime?: string | null): number | null {
+  const s = Date.parse(startTime);
+  if (Number.isNaN(s)) return null;
+  if (!endTime) return Date.now() - s;
+  const e = Date.parse(endTime);
+  if (Number.isNaN(e)) return null;
+  return e - s;
 }
 
 export type { RealtimeEvent, AgentStatusRow };
