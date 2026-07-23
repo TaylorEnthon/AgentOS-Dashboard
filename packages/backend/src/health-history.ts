@@ -38,6 +38,7 @@ import {
   type HealthHistoryRow,
 } from './health-history-repository.js';
 import type { Db } from './db.js';
+import { anomaliesToAttentionItems, detectHealthAnomalies } from './health-anomaly.js';
 
 const DEFAULT_MAX_ENTRIES = 200;     // per execution (in-memory fallback)
 const DEFAULT_MIN_INTERVAL_MS = 5 * 60_000; // 5 min dedup window for same level
@@ -272,6 +273,7 @@ class AttentionHistoryStore {
   reconcileFromQueue(
     queue: AttentionItem[],
     nowIso: string = new Date().toISOString(),
+    options: { scanExecutionIds?: string[] } = {},
   ): AttentionHistoryEntry[] {
     const out: AttentionHistoryEntry[] = [];
     const currentByExec = new Map<string, Map<string, { severity: AttentionSeverity; reason: string }>>();
@@ -284,19 +286,19 @@ class AttentionHistoryStore {
     if (attentionRepo) {
       // SQLite-backed: state = latest row's lifecycle_state
       const knownKeys = new Set<string>();
+      // Union of "execIds in current queue" + "execIds caller wants
+      // scanned for recovery" (passed in by anomaly reconciler so a
+      // vanishing anomaly still gets its 'recovered' row).
+      const execIdsToScan = new Set<string>([
+        ...currentByExec.keys(),
+        ...(options.scanExecutionIds ?? []),
+      ]);
       // We need to discover all known (exec, key) pairs. For simplicity
       // we re-query the DB for each exec in currentByExec + last seen.
       // (Cheap; we cap at 100 keys per exec.)
-      for (const execId of currentByExec.keys()) {
+      for (const execId of execIdsToScan) {
         const rows = attentionRepo.readAttention(execId, 1000);
         for (const r of rows) knownKeys.add(`${r.execution_id}|${r.attention_key}`);
-        // Also fold in any execIds that were in queue previously but
-        // not now (for "recovered" detection).
-        for (const r of rows) {
-          if (!currentByExec.has(r.execution_id)) {
-            knownKeys.add(`${r.execution_id}|${r.attention_key}`);
-          }
-        }
       }
       const seen = new Set<string>();
       for (const [execId, m] of currentByExec) {
@@ -435,6 +437,32 @@ class AttentionHistoryStore {
       reason: row.reason,
       createdAt: row.created_at,
     };
+  }
+
+  /**
+   * v1.7: detect anomalies from one execution's health history and
+   * reconcile them as attention items (so they enter the same
+   * detected / ongoing / recovered state machine as the v1.3 queue).
+   *
+   * Pure bridge: callers supply `detectHealthAnomalies(history)` →
+   * `anomaliesToAttentionItems(anomalies)` → this method feeds the
+   * resulting items into `reconcileFromQueue`. The SQLite path is
+   * reused (no new tables); the in-memory fallback path is reused.
+   *
+   * Returns the new history rows produced (same shape as
+   * reconcileFromQueue).
+   */
+  reconcileAnomalies(
+    history: import('@agentos/shared').HealthSnapshotHistory[],
+    nowIso: string = new Date().toISOString(),
+  ): AttentionHistoryEntry[] {
+    const anomalies = detectHealthAnomalies(history);
+    const items = anomaliesToAttentionItems(anomalies);
+    // Pass every executionId in the input history so the reconcile
+    // path can detect anomalies that DISAPPEARED between calls (those
+    // get a 'recovered' row).
+    const execIds = Array.from(new Set(history.map((h) => h.executionId)));
+    return this.reconcileFromQueue(items, nowIso, { scanExecutionIds: execIds });
   }
 
   /**

@@ -925,14 +925,16 @@ function WorkspaceEditor({
 type TimelineEvent =
   | { kind: 'health'; t: string; score: number; level: import('../lib/api').HealthLevel; derivedStatus: import('../lib/api').DerivedLifecycleStatus }
   | { kind: 'attention'; t: string; lifecycle: import('../lib/api').AttentionLifecycleState; severity: import('../lib/api').AttentionSeverity; attentionKey: string; reason: string }
-  | { kind: 'anomaly'; t: string; severity: 'high' | 'critical'; anomalyKind: import('../lib/api').HealthAnomalyDto['kind']; message: string };
+  | { kind: 'anomaly'; t: string; severity: 'high' | 'critical'; anomalyKind: import('../lib/api').HealthAnomalyDto['kind']; message: string }
+  | { kind: 'incident'; t: string; lifecycle: import('../lib/api').AttentionLifecycleState; severity: 'high' | 'critical'; incidentKey: string; reason: string };
 
 function HealthTimelineView({ executionId }: { executionId: string }) {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [incidents, setIncidents] = useState<import('../lib/api').HealthIncidentDto[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [from, setFrom] = useState<string>('');
   const [to, setTo] = useState<string>('');
-  const [filter, setFilter] = useState<'all' | 'health' | 'attention' | 'anomaly'>('all');
+  const [filter, setFilter] = useState<'all' | 'health' | 'attention' | 'anomaly' | 'incident'>('all');
 
   const refresh = () => {
     const range = (from || to) ? { from: from || undefined, to: to || undefined } : undefined;
@@ -940,14 +942,25 @@ function HealthTimelineView({ executionId }: { executionId: string }) {
       api.executionHealthHistory(executionId, { limit: 200, ...range }).catch(() => []),
       api.executionAttentionHistory(executionId, { limit: 200, ...range }).catch(() => []),
       api.executionHealthAnomalies(executionId, range).catch(() => []),
+      api.executionIncidents(executionId, 50).catch(() => []),
     ])
-      .then(([h, a, an]) => {
+      .then(([h, a, an, inc]) => {
         const merged: TimelineEvent[] = [];
         for (const x of h) merged.push({ kind: 'health', t: x.createdAt, score: x.score, level: x.level, derivedStatus: x.derivedStatus });
-        for (const x of a) merged.push({ kind: 'attention', t: x.createdAt, lifecycle: x.lifecycle, severity: x.severity, attentionKey: x.attentionKey, reason: x.reason });
+        for (const x of a) {
+          // v1.7: re-tag anomaly-derived attention rows as 'incident'
+          // events so the timeline can color them differently.
+          if (x.attentionKey === 'investigate-anomaly' ||
+              x.attentionKey.startsWith('investigate-anomaly-')) {
+            merged.push({ kind: 'incident', t: x.createdAt, lifecycle: x.lifecycle, severity: x.severity as 'high' | 'critical', incidentKey: x.reason, reason: x.reason });
+          } else {
+            merged.push({ kind: 'attention', t: x.createdAt, lifecycle: x.lifecycle, severity: x.severity, attentionKey: x.attentionKey, reason: x.reason });
+          }
+        }
         for (const x of an) merged.push({ kind: 'anomaly', t: x.detectedAt, severity: x.severity, anomalyKind: x.kind, message: x.message });
         merged.sort((p, q) => Date.parse(p.t) - Date.parse(q.t));
         setEvents(merged);
+        setIncidents(inc);
         setErr(null);
       })
       .catch((e) => setErr(String(e)));
@@ -1004,10 +1017,52 @@ function HealthTimelineView({ executionId }: { executionId: string }) {
               <option value="health">Health</option>
               <option value="attention">Attention</option>
               <option value="anomaly">Anomaly</option>
+              <option value="incident">Incident</option>
             </select>
           </label>
           <Button size="sm" variant="outline" onClick={() => { setFrom(''); setTo(''); }}>Clear range</Button>
         </div>
+
+        {/* v1.7: incident lifecycle summary */}
+        {incidents.length > 0 && (
+          <details className="rounded border border-border bg-muted/20 p-2">
+            <summary className="cursor-pointer text-xs font-medium">
+              {incidents.filter((i) => i.lifecycle !== 'recovered').length} active /{' '}
+              {incidents.filter((i) => i.lifecycle === 'recovered').length} recovered incidents
+            </summary>
+            <ul className="mt-2 space-y-1">
+              {incidents.map((inc) => (
+                <li key={inc.incidentKey} className="flex flex-wrap items-baseline gap-2 text-xs">
+                  <Badge
+                    tone={inc.severity === 'critical' ? 'danger' : 'warning'}
+                    className="text-[10px] uppercase"
+                  >
+                    {inc.severity}
+                  </Badge>
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{inc.kind}</span>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+                      inc.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
+                      inc.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                                    'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+                    )}
+                  >
+                    {inc.lifecycle}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">
+                    detected {formatRelative(inc.detectedAt)}
+                  </span>
+                  {inc.recoveredAt && (
+                    <span className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                      recovered {formatRelative(inc.recoveredAt)} ({Math.round((inc.durationMs ?? 0) / 60_000)}m)
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
 
         {err && <p className="text-xs text-rose-600">{err}</p>}
         {!err && visible.length === 0 && (
@@ -1061,6 +1116,31 @@ function TimelineRow({ event }: { event: TimelineEvent }) {
           {event.lifecycle}
         </span>
         <code className="font-mono text-[10px] text-muted-foreground">{event.attentionKey}</code>
+        <span className="truncate text-foreground/80" title={event.reason}>{event.reason}</span>
+      </div>
+    );
+  }
+  if (event.kind === 'incident') {
+    return (
+      <div className="flex flex-wrap items-baseline gap-2">
+        {time}
+        <Badge tone="muted" className="shrink-0 text-[10px] uppercase tracking-wider">incident</Badge>
+        <Badge
+          tone={event.severity === 'critical' ? 'danger' : 'warning'}
+          className="shrink-0 text-[10px] uppercase tracking-wider"
+        >
+          {event.severity}
+        </Badge>
+        <span
+          className={cn(
+            'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+            event.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
+            event.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                              'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+          )}
+        >
+          {event.lifecycle}
+        </span>
         <span className="truncate text-foreground/80" title={event.reason}>{event.reason}</span>
       </div>
     );

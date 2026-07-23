@@ -691,7 +691,10 @@ export type AttentionAction =
   | 'archive'              // very old, no movement
   | 'confirm-completion'   // manual=done but no end_time / commit
   | 'monitor'              // generic — keep an eye on it
-  | 'investigate-anomaly'  // v1.6: health anomaly (score drop / level regression / rapid degradation)
+  | 'investigate-anomaly'  // v1.6: health anomaly (umbrella action)
+  | 'investigate-anomaly-score-drop'         // v1.7: score-drop anomaly incident
+  | 'investigate-anomaly-level-regression'   // v1.7: level-regression anomaly incident
+  | 'investigate-anomaly-rapid-degradation'  // v1.7: rapid-degradation anomaly incident
   ;
 
 /**
@@ -885,4 +888,63 @@ export interface HealthAnomalyOptions {
   rapidDegradationWindow?: number;
   /** Anomaly detection timestamp (test hook); defaults to Date.now(). */
   nowMs?: number;
+}
+
+/* ---------------- v1.7: Health Incident Intelligence ---------------- */
+
+/**
+ * One Health Incident — the lifecycle of a (execution, anomaly-kind)
+ * pair tracked via the Attention history. Detected when an anomaly
+ * first fires for an execution, ongoing while it keeps firing,
+ * recovered when the anomaly stops appearing across reconciliation
+ * passes.
+ *
+ * Pure-derived from `execution_attention_history` rows where
+ * `attention_key = 'investigate-anomaly'` and `severity IN ('high','critical')`.
+ */
+export interface HealthIncident {
+  /** Stable incident key = `${executionId}|${anomalyKind}`. */
+  incidentKey: string;
+  executionId: string;
+  /** Anomaly kind that triggered the incident (mirrors HealthAnomalyKind). */
+  kind: HealthAnomalyKind;
+  /** Worst severity observed across the incident's lifetime. */
+  severity: HealthAnomalySeverity;
+  /** ISO timestamp of the first 'detected' row. */
+  detectedAt: string;
+  /** ISO timestamp of the latest transition (ongoing or recovered). null when still in 'detected'. */
+  lastTransitionAt: string | null;
+  /** Current state. */
+  lifecycle: AttentionLifecycleState;
+  /** ISO timestamp of the most recent 'recovered' row (only when recovered). */
+  recoveredAt: string | null;
+  /** ms from detectedAt → recoveredAt; null when not recovered or recovered in same pass. */
+  durationMs: number | null;
+  /** Reason text (from the anomaly that triggered detection). */
+  reason: string;
+}
+
+/**
+ * Workspace-level incident rollup. Pure aggregation, no DB writes.
+ * Returned by `/api/incidents/summary`.
+ */
+export interface IncidentSummary {
+  /** Incidents in 'detected' or 'ongoing' state. */
+  active: number;
+  /** Incidents that have transitioned to 'recovered'. */
+  recovered: number;
+  /** Active + recovered critical-severity incidents. */
+  criticalCount: number;
+  /** Active + recovered high-severity incidents. */
+  highCount: number;
+  /** Top N most-active executions (by active incident count), descending. */
+  topAffected: Array<{
+    executionId: string;
+    activeCount: number;
+    worstSeverity: HealthAnomalySeverity;
+  }>;
+  /** Most recent N recovered incidents, newest first. */
+  recentRecovered: HealthIncident[];
+  /** When this summary was computed. */
+  computedAt: string;
 }

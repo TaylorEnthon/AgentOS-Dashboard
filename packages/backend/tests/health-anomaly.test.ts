@@ -305,7 +305,13 @@ test('anomaly→attention: pure read-only bridge', () => {
   const items = anomaliesToAttentionItems(anomalies);
   assert.equal(items.length, anomalies.length);
   for (const it of items) {
-    assert.equal(it.recommendedAction, 'investigate-anomaly');
+    assert.ok(
+      it.recommendedAction === 'investigate-anomaly' ||
+      it.recommendedAction === 'investigate-anomaly-score-drop' ||
+      it.recommendedAction === 'investigate-anomaly-level-regression' ||
+      it.recommendedAction === 'investigate-anomaly-rapid-degradation',
+      `unexpected action: ${it.recommendedAction}`,
+    );
     assert.equal(it.derivedStatus, null);
     assert.ok(it.severity === 'high' || it.severity === 'critical');
     assert.ok(typeof it.reason === 'string' && it.reason.length > 0);

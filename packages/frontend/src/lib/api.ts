@@ -434,7 +434,10 @@ export type AttentionAction =
   | 'archive'
   | 'confirm-completion'
   | 'monitor'
-  | 'investigate-anomaly';
+  | 'investigate-anomaly'
+  | 'investigate-anomaly-score-drop'
+  | 'investigate-anomaly-level-regression'
+  | 'investigate-anomaly-rapid-degradation';
 
 export interface AttentionItemDto {
   executionId: string;
@@ -508,6 +511,33 @@ export interface HealthAnomalyDto {
   fromAt: string;
   detectedAt: string;
   message: string;
+}
+
+export interface HealthIncidentDto {
+  incidentKey: string;
+  executionId: string;
+  kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
+  severity: 'high' | 'critical';
+  detectedAt: string;
+  lastTransitionAt: string | null;
+  lifecycle: 'detected' | 'ongoing' | 'recovered';
+  recoveredAt: string | null;
+  durationMs: number | null;
+  reason: string;
+}
+
+export interface IncidentSummaryDto {
+  active: number;
+  recovered: number;
+  criticalCount: number;
+  highCount: number;
+  topAffected: Array<{
+    executionId: string;
+    activeCount: number;
+    worstSeverity: 'high' | 'critical';
+  }>;
+  recentRecovered: HealthIncidentDto[];
+  computedAt: string;
 }
 
 export interface AgentReliabilitySummaryDto {
@@ -721,6 +751,17 @@ export const api = {
     return http<HealthAnomalyDto[]>(
       `/api/executions/${encodeURIComponent(id)}/health/anomalies${qs ? `?${qs}` : ''}`,
     );
+  },
+  executionIncidents: (id: string, limit?: number) =>
+    http<HealthIncidentDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/incidents${limit != null ? `?limit=${limit}` : ''}`,
+    ),
+  incidentSummary: (opts?: { topAffectedLimit?: number; recentRecoveredLimit?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.topAffectedLimit != null)     params.set('topAffectedLimit', String(opts.topAffectedLimit));
+    if (opts?.recentRecoveredLimit != null) params.set('recentRecoveredLimit', String(opts.recentRecoveredLimit));
+    const qs = params.toString();
+    return http<IncidentSummaryDto>(`/api/incidents/summary${qs ? `?${qs}` : ''}`);
   },
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

@@ -210,27 +210,46 @@ function messageFor(a: AnomalyBuildArgs): string {
 }
 
 /**
- * Bridge for the Attention Queue (v1.6): turn `HealthAnomaly[]` into
- * a stream of "virtual attention items" with severity high/critical.
+ * Bridge for the Attention Queue (v1.6 / v1.7): turn `HealthAnomaly[]`
+ * into a stream of "virtual attention items" with severity high/critical.
  *
- * Pure / read-only: never persisted. Caller decides whether to
- * inject into the live queue (it shouldn't — we keep them out of
- * reconcileFromQueue's persisted history) or just expose via API.
+ * v1.7: each anomaly kind gets a distinct `recommendedAction` so the
+ * downstream `reconcileFromQueue` keys one attention row per
+ * (executionId, kind) pair. `attentionKey` stays as the umbrella
+ * 'investigate-anomaly' so the existing `isAnomalyEntry` filter
+ * still works.
+ *
+ * `reason` carries a `[kind]` prefix that `incident-summary.extractKind`
+ * parses back into the anomaly kind.
+ *
+ * Pure / read-only: never persisted by itself. The caller (route
+ * handler) feeds these into `attentionHistoryStore.reconcileFromQueue`,
+ * which writes detected/ongoing/recovered rows to
+ * `execution_attention_history` (existing v1.5 table).
  */
 export function anomaliesToAttentionItems(anomalies: HealthAnomaly[]): Array<{
   executionId: string;
   severity: HealthAnomalySeverity;
   reason: string;
-  recommendedAction: 'investigate-anomaly';
+  recommendedAction:
+    | 'investigate-anomaly'
+    | 'investigate-anomaly-score-drop'
+    | 'investigate-anomaly-level-regression'
+    | 'investigate-anomaly-rapid-degradation';
   derivedStatus: null;
   detectedAt: string;
   kind: HealthAnomalyKind;
 }> {
+  const KIND_TO_ACTION = {
+    'score-drop': 'investigate-anomaly-score-drop',
+    'level-regression': 'investigate-anomaly-level-regression',
+    'rapid-degradation': 'investigate-anomaly-rapid-degradation',
+  } as const;
   return anomalies.map((a) => ({
     executionId: a.executionId,
     severity: a.severity,
-    reason: a.message,
-    recommendedAction: 'investigate-anomaly',
+    reason: `[${a.kind}] ${a.message}`,
+    recommendedAction: KIND_TO_ACTION[a.kind],
     derivedStatus: null,
     detectedAt: a.detectedAt,
     kind: a.kind,

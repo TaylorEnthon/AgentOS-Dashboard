@@ -276,6 +276,9 @@ export function WorkspacePage() {
       {/* v1.3: Workspace Health Summary */}
       {summary && <SummaryHeader summary={summary} />}
 
+      {/* v1.7: Incident Overview — anomaly-driven health incidents */}
+      <IncidentSection />
+
       {/* v1.3: Attention Queue */}
       <AttentionQueueSection items={attention} />
 
@@ -450,6 +453,114 @@ function AttentionQueueSection({ items }: { items: AttentionItemDto[] }) {
           <p className="mt-2 text-[11px] text-muted-foreground">
             Showing 10 of {items.length} items.
           </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * v1.7: Incident Overview — workspace-level rollup of anomaly-driven
+ * health incidents. Read-only display of:
+ *   - active vs recovered counts (with critical / high breakdown)
+ *   - top affected executions (by active incident count)
+ *   - most recent recovered incidents
+ * Pure presentational — fetches from /api/incidents/summary.
+ */
+function IncidentSection() {
+  const [data, setData] = useState<import('../lib/api').IncidentSummaryDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => api.incidentSummary({ topAffectedLimit: 5, recentRecoveredLimit: 5 })
+      .then((d) => { if (!cancelled) { setData(d); setErr(null); } })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    load();
+    const t = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle>Health Incidents</CardTitle>
+        <CardDescription>
+          Anomaly-driven health incidents (score drops / level regressions /
+          rapid degradation) tracked through detected → ongoing → recovered.
+          Read-only.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && !data && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {!err && data && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              <Badge tone={data.active > 0 ? 'warning' : 'success'} className="text-xs">
+                {data.active} active
+              </Badge>
+              <Badge tone="muted" className="text-xs">
+                {data.recovered} recovered
+              </Badge>
+              <Badge tone={data.criticalCount > 0 ? 'danger' : 'muted'} className="text-xs">
+                {data.criticalCount} critical
+              </Badge>
+              <Badge tone="muted" className="text-xs">
+                {data.highCount} high
+              </Badge>
+            </div>
+
+            {data.topAffected.length > 0 && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Top affected</h4>
+                <ul className="space-y-1">
+                  {data.topAffected.map((e) => (
+                    <li key={e.executionId} className="flex items-baseline gap-2 text-xs">
+                      <Link
+                        to={`/executions/${encodeURIComponent(e.executionId)}`}
+                        className="font-mono text-[11px] text-primary hover:underline truncate flex-1"
+                        title={e.executionId}
+                      >
+                        {e.executionId}
+                      </Link>
+                      <Badge tone={e.worstSeverity === 'critical' ? 'danger' : 'warning'} className="text-[10px] uppercase">
+                        {e.worstSeverity}
+                      </Badge>
+                      <span className="tabular-nums text-muted-foreground">{e.activeCount}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {data.recentRecovered.length > 0 && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Recent recoveries</h4>
+                <ul className="space-y-0.5">
+                  {data.recentRecovered.slice(0, 3).map((inc) => (
+                    <li key={inc.incidentKey} className="flex items-baseline gap-2 text-[11px]">
+                      <Link
+                        to={`/executions/${encodeURIComponent(inc.executionId)}`}
+                        className="font-mono text-[10px] text-muted-foreground hover:underline truncate flex-1"
+                        title={inc.executionId}
+                      >
+                        {inc.executionId}
+                      </Link>
+                      <span className="text-emerald-700 dark:text-emerald-400 uppercase text-[10px]">recovered</span>
+                      <span className="tabular-nums text-muted-foreground">{inc.kind}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {data.active === 0 && data.recovered === 0 && (
+              <p className="text-sm text-emerald-700 dark:text-emerald-400">
+                ✓ No health incidents detected yet — record health snapshots to start tracking.
+              </p>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

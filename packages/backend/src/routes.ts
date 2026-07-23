@@ -34,6 +34,7 @@ import {
   healthHistoryStore,
 } from './health-history.js';
 import { detectHealthAnomalies } from './health-anomaly.js';
+import { extractKind, rowsToIncident, summarizeIncidents } from './incident-summary.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -827,6 +828,10 @@ export function registerRoutes(
   });
 
   // v1.3-c: Attention Queue — top N items the user should look at.
+  // v1.7: also reconciles anomaly-derived incidents into the attention
+  // lifecycle, so detected/ongoing/recovered rows for
+  // `investigate-anomaly` get persisted alongside the v1.3 conflict /
+  // blocked / failed attention items.
   app.get<{ Querystring: { limit?: string } }>('/api/attention', async (req) => {
     const lim = Math.max(1, Math.min(req.query.limit ? Number(req.query.limit) : 50, 200));
     const allExecs = db.listSessions({ limit: 1000 });
@@ -851,6 +856,19 @@ export function registerRoutes(
       }
     }
     const queue = buildAttentionQueue(inputs);
+
+    // v1.7: detect anomalies per execution and reconcile them into
+    // the same attention lifecycle. Read-only with respect to the
+    // user's state — anomaly rows live in `execution_attention_history`
+    // alongside the existing v1.3 queue items, distinguished by
+    // attention_key = 'investigate-anomaly'.
+    for (const inp of inputs) {
+      const history = healthHistoryStore.read(inp.executionId, 200);
+      if (history.length >= 2) {
+        attentionHistoryStore.reconcileAnomalies(history);
+      }
+    }
+
     // v1.4: reconcile against in-memory history to record
     // detected/ongoing/recovered transitions.
     attentionHistoryStore.reconcileFromQueue(queue);
@@ -1002,6 +1020,68 @@ export function registerRoutes(
     }
     return computeAgentReliability(allHistory, agentTypes);
   });
+
+  // v1.7: Workspace Incident Summary — pure aggregation across all
+  // anomaly-derived attention history rows. No new tables; reads from
+  // the existing `execution_attention_history` filtered to
+  // attention_key = 'investigate-anomaly'.
+  app.get<{ Querystring: { topAffectedLimit?: string; recentRecoveredLimit?: string } }>(
+    '/api/incidents/summary',
+    async (req) => {
+      const allExecs = db.listSessions({ limit: 1000 });
+      const rows: import('@agentos/shared').AttentionHistoryEntry[] = [];
+      for (const s of allExecs) {
+        const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+        const groups = groupEventsIntoExecutions(events);
+        for (let i = 0; i < groups.length; i++) {
+          const execId = `${s.id}:exec-${i}`;
+          // read attention history with limit=1000 to cover the full lifecycle
+          rows.push(...attentionHistoryStore.read(execId, 1000));
+        }
+      }
+      const topN = req.query.topAffectedLimit ? Math.max(1, Math.min(Number(req.query.topAffectedLimit), 50)) : 5;
+      const recentN = req.query.recentRecoveredLimit ? Math.max(1, Math.min(Number(req.query.recentRecoveredLimit), 50)) : 5;
+      return summarizeIncidents(rows, { topAffectedLimit: topN, recentRecoveredLimit: recentN });
+    },
+  );
+
+  // v1.7: Per-execution incident list — for the ExecutionDetail page.
+  // Pure aggregation over the existing attention history rows for one
+  // execution, filtered to anomaly-derived incidents.
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+    '/api/executions/:id/incidents',
+    async (req) => {
+      const lastColon = req.params.id.lastIndexOf(':exec-');
+      if (lastColon < 0) return [];
+      const sessionId = req.params.id.slice(0, lastColon);
+      if (!db.getSession(sessionId)) return [];
+      const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 50;
+      const rows = attentionHistoryStore.read(req.params.id, lim);
+      // Group by (executionId, kind).
+      const groups = new Map<string, typeof rows>();
+      for (const r of rows) {
+        if (r.attentionKey !== 'investigate-anomaly' &&
+            !r.attentionKey.startsWith('investigate-anomaly-')) continue;
+        const k = `${r.executionId}|${extractKind(r.reason)}`;
+        const arr = groups.get(k);
+        if (arr) arr.push(r);
+        else groups.set(k, [r]);
+      }
+      const incidents: import('@agentos/shared').HealthIncident[] = [];
+      for (const g of groups.values()) {
+        const inc = rowsToIncident(g);
+        if (inc) incidents.push(inc);
+      }
+      // Sort: active first, then recovered (newest first).
+      incidents.sort((a, b) => {
+        const aActive = a.lifecycle !== 'recovered' ? 0 : 1;
+        const bActive = b.lifecycle !== 'recovered' ? 0 : 1;
+        if (aActive !== bActive) return aActive - bActive;
+        return Date.parse(b.detectedAt) - Date.parse(a.detectedAt);
+      });
+      return incidents;
+    },
+  );
 
   /* ---------------- v0.6 Git integration ---------------- */
 
