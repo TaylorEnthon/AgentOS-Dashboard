@@ -1086,6 +1086,7 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
                   </ul>
                   <HistoricalContextBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                   <RootCauseEvidenceBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
+                  <InvestigationReportBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                 </div>
               )}
             </>
@@ -1201,6 +1202,79 @@ function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
             </span>
           </li>
         ))}
+      </ul>
+    </div>
+  );
+}
+
+/* ---------------- v1.15: Investigation Report Block ----------------
+ *
+ * Lazy-loaded compact summary that bundles the three per-incident
+ * views (v1.12 investigation, v1.13 history, v1.14 evidence) into a
+ * single panel. ONE round-trip per investigation open. Read-only.
+ *
+ * Renders three mini-rows:
+ *   - Priority summary: <level> (score <n>) · <totalRelated> incidents
+ *   - Historical:       <occurrenceCount> · <recoveryPct>% recovered · <avgDuration>
+ *   - Evidence:         <evidenceCount> items · max confidence <pct>%
+ *
+ * Silently degrades to null display on failure.
+ */
+function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
+  const [report, setReport] = useState<import('../lib/api').IncidentInvestigationReportDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.incidentReport(incidentKey)
+      .then((d) => { if (!cancelled) setReport(d); })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    return () => { cancelled = true; };
+  }, [incidentKey]);
+
+  if (err) return <p className="text-[10px] text-rose-600 mt-1">report: {err}</p>;
+  if (!report) return <p className="text-[10px] text-muted-foreground mt-1">loading report…</p>;
+
+  const { investigation, history, evidence } = report;
+  const priorityTone = investigation.priority.priorityLevel === 'critical'
+    ? 'danger' : investigation.priority.priorityLevel === 'high' ? 'warning' : 'muted';
+  const recoveryPct = history.occurrenceCount > 0
+    ? Math.round((history.recoveredCount / history.occurrenceCount) * 100) : 0;
+  const avgLabel = history.averageDurationMs !== null ? formatDuration(history.averageDurationMs) : '—';
+  const maxConfidencePct = Math.round(evidence.confidence * 100);
+
+  return (
+    <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
+      <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        Investigation report
+      </h5>
+      <ul className="mt-1 space-y-0.5 text-[10px]">
+        <li className="flex items-baseline gap-2">
+          <Badge tone={priorityTone} className="shrink-0 uppercase">priority</Badge>
+          <span className="flex-1 text-foreground/90">
+            {investigation.priority.priorityId} · score {Math.round(investigation.priority.priorityScore)}
+          </span>
+          <span className="shrink-0 tabular-nums text-muted-foreground">
+            {investigation.summary.totalRelatedIncidents} related
+          </span>
+        </li>
+        <li className="flex items-baseline gap-2">
+          <Badge tone="muted" className="shrink-0 uppercase">history</Badge>
+          <span className="flex-1 text-foreground/90">
+            {history.kind} · {recoveryPct}% recovered · avg {avgLabel}
+          </span>
+          <span className="shrink-0 tabular-nums text-muted-foreground">
+            {history.occurrenceCount}× occ
+          </span>
+        </li>
+        <li className="flex items-baseline gap-2">
+          <Badge tone="muted" className="shrink-0 uppercase">evidence</Badge>
+          <span className="flex-1 text-foreground/90">
+            {evidence.evidence.length} item{evidence.evidence.length === 1 ? '' : 's'}
+          </span>
+          <span className="shrink-0 tabular-nums text-muted-foreground">
+            max {maxConfidencePct}%
+          </span>
+        </li>
       </ul>
     </div>
   );

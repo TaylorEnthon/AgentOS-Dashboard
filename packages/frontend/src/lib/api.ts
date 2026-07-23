@@ -670,6 +670,16 @@ export interface IncidentRootCauseEvidenceDto {
   computedAt: string;
 }
 
+/* v1.15: Incident Investigation Report */
+
+export interface IncidentInvestigationReportDto {
+  incidentKey: string;
+  investigation: IncidentInvestigationViewDto;
+  history: IncidentHistoricalContextDto;
+  evidence: IncidentRootCauseEvidenceDto;
+  generatedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1120,6 +1130,10 @@ export const api = {
   incidentEvidence: (incidentKey: string) =>
     http<IncidentRootCauseEvidenceDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/evidence`,
+    ),
+  incidentReport: (incidentKey: string) =>
+    http<IncidentInvestigationReportDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/report`,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

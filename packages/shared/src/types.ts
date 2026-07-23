@@ -1630,3 +1630,34 @@ export interface IncidentRootCauseEvidence {
   /** When this evidence was computed (caller-supplied nowIso). */
   computedAt: string;
 }
+
+/* ---------------- v1.15: Incident Investigation Report ---------------- */
+
+/**
+ * v1.15: Unified investigation report for a single HealthIncident.
+ *
+ * Bundles the three per-incident views built by previous versions:
+ *   - v1.12 IncidentInvestigationView  — priority context, related incidents,
+ *                                       affected executions/agents, evidence chain
+ *   - v1.13 IncidentHistoricalContext  — kind-wide occurrence / recovery /
+ *                                       recurrence metrics
+ *   - v1.14 IncidentRootCauseEvidence  — why this might be happening
+ *
+ * Pure aggregation: this type does NOT recompute any of the three views.
+ * The caller computes each view via its dedicated pure module and packs
+ * them here. Read-only / deterministic.
+ *
+ * Returned by `GET /api/incidents/:incidentKey/report`.
+ */
+export interface IncidentInvestigationReport {
+  /** The incidentKey this report is for (echo). */
+  incidentKey: string;
+  /** v1.12 priority-keyed view (passthrough). */
+  investigation: IncidentInvestigationView;
+  /** v1.13 kind-wide historical context (passthrough). */
+  history: IncidentHistoricalContext;
+  /** v1.14 why-this-might-be-happening evidence (passthrough). */
+  evidence: IncidentRootCauseEvidence;
+  /** ISO timestamp at which the report was assembled (caller-supplied). */
+  generatedAt: string;
+}
