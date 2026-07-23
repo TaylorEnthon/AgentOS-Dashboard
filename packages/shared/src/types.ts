@@ -1512,3 +1512,58 @@ export interface IncidentInvestigationView {
   };
   computedAt: string;
 }
+
+/* ---------------- v1.13: Incident Historical Context ---------------- */
+
+/**
+ * Historical context for a HealthIncident, answering "has this kind
+ * of incident happened before, and how often does it recover?".
+ *
+ * Given a current incident identified by `incidentKey` (format
+ * `${executionId}|${kind}`), this aggregates metrics over every
+ * HealthIncident in the supplied pool whose `kind` matches the
+ * subject kind — i.e. "all `score-drop` (or `level-regression` /
+ * `rapid-degradation`) incidents across every execution".
+ *
+ * The current incident itself is included in `occurrenceCount` and
+ * the duration/severity statistics; it is excluded from
+ * `previousIncidents` so the UI can list "what came before this one".
+ *
+ * Pure-derived; deterministic; no DB writes. Returned by
+ * `GET /api/incidents/:incidentKey/history`.
+ */
+export interface IncidentHistoricalContext {
+  /** The incidentKey this context was computed for (echo). */
+  incidentKey: string;
+  /** The `kind` part of incidentKey (mirrors HealthAnomalyKind). */
+  kind: HealthAnomalyKind;
+  /** The `executionId` part of incidentKey (echo). */
+  executionId: string;
+  /** Total HealthIncidents in the pool with the same kind. >= 1 when current was found. */
+  occurrenceCount: number;
+  /** Count of matched incidents with lifecycle === 'recovered'. */
+  recoveredCount: number;
+  /** Mean durationMs across matched incidents that have a non-null durationMs. null when no recovered. */
+  averageDurationMs: number | null;
+  /** Max durationMs across matched incidents. null when no recovered. */
+  maxDurationMs: number | null;
+  /** Earliest detectedAt across matched incidents. null when pool is empty. */
+  firstSeen: string | null;
+  /** Latest lastTransitionAt (fallback detectedAt) across matched incidents. null when pool is empty. */
+  lastSeen: string | null;
+  /**
+   * Recurrence rate in [0, 1] = (# matched with escalationCount > 0) / occurrenceCount.
+   * 0 when occurrenceCount is 0. Indicates how often this kind has shown
+   * severity-upgrade patterns in the pool — a proxy for "recurring
+   * severity pressure" without needing raw attention rows.
+   */
+  recurrenceRate: number;
+  /**
+   * All matched HealthIncidents (same kind) sorted by detectedAt DESC,
+   * excluding the current one when found. Capped at 50 for UI sanity.
+   */
+  previousIncidents: HealthIncident[];
+  /** True when the current incident was found in the pool AND matched ≥ 1. */
+  hasHistory: boolean;
+  computedAt: string;
+}

@@ -625,6 +625,24 @@ export interface AgentIncidentBundleDto {
   computedAt: string;
 }
 
+/* v1.13: Incident Historical Context */
+
+export interface IncidentHistoricalContextDto {
+  incidentKey: string;
+  kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
+  executionId: string;
+  occurrenceCount: number;
+  recoveredCount: number;
+  averageDurationMs: number | null;
+  maxDurationMs: number | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  recurrenceRate: number;
+  previousIncidents: HealthIncidentDto[];
+  hasHistory: boolean;
+  computedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1068,6 +1086,10 @@ export const api = {
       `/api/incidents/investigation/${encodeURIComponent(priorityId)}${qs ? `?${qs}` : ''}`,
     );
   },
+  incidentHistory: (incidentKey: string) =>
+    http<IncidentHistoricalContextDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/history`,
+    ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
 };

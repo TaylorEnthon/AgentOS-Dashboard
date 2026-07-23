@@ -1084,6 +1084,7 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
                       </li>
                     ))}
                   </ul>
+                  <HistoricalContextBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                 </div>
               )}
             </>
@@ -1093,3 +1094,65 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
     </div>
   );
 }
+
+/* ---------------- v1.13: Historical Context Block ----------------
+ *
+ * Lazy-loaded historical context for the FIRST related incident of
+ * an investigation. Shows aggregate metrics over every HealthIncident
+ * in the pool with the same `kind`:
+ *   - occurrenceCount / recoveredCount
+ *   - averageDurationMs (when available)
+ *   - lastSeen / firstSeen timestamps
+ *   - recurrence badge (when escalationCount > 0 incidents dominate)
+ *
+ * Read-only; no mutation. Fetches on first render, caches in state,
+ * silently degrades to null display on failure.
+ */
+function HistoricalContextBlock({ incidentKey }: { incidentKey: string }) {
+  const [ctx, setCtx] = useState<import('../lib/api').IncidentHistoricalContextDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.incidentHistory(incidentKey)
+      .then((d) => { if (!cancelled) setCtx(d); })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    return () => { cancelled = true; };
+  }, [incidentKey]);
+
+  if (err) return <p className="text-[10px] text-rose-600 mt-1">history: {err}</p>;
+  if (!ctx) return <p className="text-[10px] text-muted-foreground mt-1">loading history…</p>;
+  if (!ctx.hasHistory) return null;
+
+  const recoveryRate = ctx.occurrenceCount > 0
+    ? Math.round((ctx.recoveredCount / ctx.occurrenceCount) * 100)
+    : 0;
+  const recurring = ctx.recurrenceRate > 0.5;
+  const avgMs = ctx.averageDurationMs;
+  const avgLabel = avgMs !== null ? formatDuration(avgMs) : '—';
+  const maxLabel = ctx.maxDurationMs !== null ? formatDuration(ctx.maxDurationMs) : '—';
+
+  return (
+    <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
+      <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        Historical context — {ctx.kind}
+      </h5>
+      <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
+        <Badge tone="muted">{ctx.occurrenceCount} occurrences</Badge>
+        <Badge tone={ctx.recoveredCount === ctx.occurrenceCount && ctx.occurrenceCount > 0 ? 'success' : 'muted'}>
+          {recoveryRate}% recovered
+        </Badge>
+        <Badge tone="muted">avg {avgLabel}</Badge>
+        <Badge tone="muted">max {maxLabel}</Badge>
+        {recurring && <Badge tone="warning">recurring</Badge>}
+      </div>
+      {ctx.previousIncidents.length > 0 && (
+        <p className="text-[10px] text-muted-foreground mt-1">
+          {ctx.previousIncidents.length} prior incident{ctx.previousIncidents.length === 1 ? '' : 's'} of this kind
+          {ctx.lastSeen && <> · last seen {formatRelative(ctx.lastSeen)}</>}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- v1.12: Investigation Panel end ---------------- */

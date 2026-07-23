@@ -62,7 +62,11 @@ const HOUR_AGO = new Date(NOON - 60 * 60_000).toISOString();
 
 function makePriorities(incidents: HealthIncident[], execToAgent: Map<string, string>): IncidentPriorityInsight[] {
   const summary = summarizeWindow(incidents, execToAgent, { sinceIso: HOUR_AGO, untilIso: NOON_ISO });
-  const signals = detectIntelligenceSignals(incidents, execToAgent, {});
+  // v1.13 fix: pass nowMs: NOON so detectIntelligenceSignals uses the
+  // same pinned clock as the fixtures. Without this, signals depend on
+  // wall-clock time and the test fails outside the 1-hour window around
+  // NOON UTC.
+  const signals = detectIntelligenceSignals(incidents, execToAgent, { nowMs: NOON });
   void summary;
   return buildPriorities({
     signals: signals.signals,

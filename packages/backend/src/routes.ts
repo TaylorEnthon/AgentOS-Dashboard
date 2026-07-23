@@ -51,6 +51,7 @@ import {
 } from './incident-temporal.js';
 import { buildPriorities } from './incident-priority.js';
 import { buildInvestigation } from './incident-investigation.js';
+import { buildHistoricalContext } from './incident-history.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1360,6 +1361,32 @@ export function registerRoutes(
         return reply.code(404).send({ error: 'priority not found in current snapshot' });
       }
       return investigation;
+    },
+  );
+
+  // v1.13: Historical context for a single incident. Aggregates
+  // metrics across every HealthIncident in the pool with the same
+  // `kind` — answering "has this kind of incident happened before,
+  // and how often does it recover?". Read-only; no DB writes.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey/history',
+    async (req, reply) => {
+      const incidentKey = decodeURIComponent(req.params.incidentKey);
+      if (!incidentKey || !incidentKey.includes('|')) {
+        return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
+      }
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
+      const { incidents } = await collectAllIncidents(db);
+      const ctx = buildHistoricalContext({
+        incidentKey,
+        allIncidents: incidents,
+        nowIso,
+      });
+      if (!ctx) {
+        return reply.code(404).send({ error: 'incident not found in current pool' });
+      }
+      return ctx;
     },
   );
 
