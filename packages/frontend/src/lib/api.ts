@@ -433,7 +433,8 @@ export type AttentionAction =
   | 'restart-or-abandon'
   | 'archive'
   | 'confirm-completion'
-  | 'monitor';
+  | 'monitor'
+  | 'investigate-anomaly';
 
 export interface AttentionItemDto {
   executionId: string;
@@ -494,6 +495,19 @@ export interface AttentionHistoryEntryDto {
   severity: AttentionSeverity;
   reason: string;
   createdAt: string;
+}
+
+export interface HealthAnomalyDto {
+  executionId: string;
+  kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
+  severity: 'high' | 'critical';
+  fromScore: number;
+  toScore: number;
+  fromLevel: HealthLevel | null;
+  toLevel: HealthLevel;
+  fromAt: string;
+  detectedAt: string;
+  message: string;
 }
 
 export interface AgentReliabilitySummaryDto {
@@ -657,18 +671,57 @@ export const api = {
   workspaceSummary: () =>
     http<WorkspaceHealthSummaryDto>('/api/workspace/summary'),
   // v1.4: Health Memory & Trend
-  executionHealthHistory: (id: string, limit?: number) =>
-    http<HealthSnapshotHistoryDto[]>(
-      `/api/executions/${encodeURIComponent(id)}/health/history${limit != null ? `?limit=${limit}` : ''}`,
-    ),
-  executionHealthTrend: (id: string, limit?: number) =>
-    http<HealthTrendDto>(
-      `/api/executions/${encodeURIComponent(id)}/health/trend${limit != null ? `?limit=${limit}` : ''}`,
-    ),
-  executionAttentionHistory: (id: string, limit?: number) =>
-    http<AttentionHistoryEntryDto[]>(
-      `/api/executions/${encodeURIComponent(id)}/attention/history${limit != null ? `?limit=${limit}` : ''}`,
-    ),
+  executionHealthHistory: (
+    id: string,
+    opts?: number | { limit?: number; from?: string; to?: string },
+  ) => {
+    const params = new URLSearchParams();
+    const o = typeof opts === 'number' ? { limit: opts } : opts;
+    if (o?.limit != null) params.set('limit', String(o.limit));
+    if (o?.from) params.set('from', o.from);
+    if (o?.to)   params.set('to', o.to);
+    const qs = params.toString();
+    return http<HealthSnapshotHistoryDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/health/history${qs ? `?${qs}` : ''}`,
+    );
+  },
+  executionHealthTrend: (
+    id: string,
+    opts?: number | { limit?: number; from?: string; to?: string },
+  ) => {
+    const params = new URLSearchParams();
+    const o = typeof opts === 'number' ? { limit: opts } : opts;
+    if (o?.limit != null) params.set('limit', String(o.limit));
+    if (o?.from) params.set('from', o.from);
+    if (o?.to)   params.set('to', o.to);
+    const qs = params.toString();
+    return http<HealthTrendDto>(
+      `/api/executions/${encodeURIComponent(id)}/health/trend${qs ? `?${qs}` : ''}`,
+    );
+  },
+  executionAttentionHistory: (
+    id: string,
+    opts?: number | { limit?: number; from?: string; to?: string },
+  ) => {
+    const params = new URLSearchParams();
+    const o = typeof opts === 'number' ? { limit: opts } : opts;
+    if (o?.limit != null) params.set('limit', String(o.limit));
+    if (o?.from) params.set('from', o.from);
+    if (o?.to)   params.set('to', o.to);
+    const qs = params.toString();
+    return http<AttentionHistoryEntryDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/attention/history${qs ? `?${qs}` : ''}`,
+    );
+  },
+  executionHealthAnomalies: (id: string, opts?: { from?: string; to?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.from) params.set('from', opts.from);
+    if (opts?.to)   params.set('to', opts.to);
+    const qs = params.toString();
+    return http<HealthAnomalyDto[]>(
+      `/api/executions/${encodeURIComponent(id)}/health/anomalies${qs ? `?${qs}` : ''}`,
+    );
+  },
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
 };

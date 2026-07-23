@@ -158,15 +158,38 @@ class HealthHistoryStore {
     return entry;
   }
 
-  /** Read snapshots for one execution, oldest-first, capped at limit. */
-  read(executionId: string, limit = 100): HealthSnapshotHistory[] {
+  /**
+   * v1.6: read snapshots for one execution, oldest-first.
+   *
+   * Backward-compatible signatures:
+   *   - read(executionId, limit)
+   *   - read(executionId, { limit?, from?, to? })
+   *
+   * In SQLite mode the `from` / `to` bounds are pushed into SQL
+   * (half-open: from inclusive, to exclusive). In in-memory mode
+   * the bounds are applied after fetching.
+   */
+  read(
+    executionId: string,
+    limitOrOpts: number | { limit?: number; from?: string; to?: string } = 100,
+  ): HealthSnapshotHistory[] {
+    const opts = typeof limitOrOpts === 'number'
+      ? { limit: limitOrOpts }
+      : limitOrOpts;
+    const limit = opts.limit ?? 100;
+    const range = (opts.from || opts.to)
+      ? { fromIso: opts.from, toIso: opts.to }
+      : undefined;
     if (healthRepo) {
-      const rows = healthRepo.readHealth(executionId, limit);
+      const rows = healthRepo.readHealth(executionId, limit, range);
       return rows.map((r) => this.rowToEntry(r));
     }
     const arr = this.byExec.get(executionId) ?? [];
+    let filtered = arr;
+    if (opts.from) filtered = filtered.filter((s) => s.entry.createdAt >= opts.from!);
+    if (opts.to)   filtered = filtered.filter((s) => s.entry.createdAt <  opts.to!);
     const cap = Math.max(1, Math.min(limit, this.maxEntries));
-    return arr.slice(-cap).map((s) => s.entry);
+    return filtered.slice(-cap).map((s) => s.entry);
   }
 
   /** Latest entry for an execution, or null. */
@@ -414,14 +437,31 @@ class AttentionHistoryStore {
     };
   }
 
-  read(executionId: string, limit = 100): AttentionHistoryEntry[] {
+  /**
+   * v1.6: read attention history for one execution, oldest-first.
+   * Same backward-compatible overloads as HealthHistoryStore.read.
+   */
+  read(
+    executionId: string,
+    limitOrOpts: number | { limit?: number; from?: string; to?: string } = 100,
+  ): AttentionHistoryEntry[] {
+    const opts = typeof limitOrOpts === 'number'
+      ? { limit: limitOrOpts }
+      : limitOrOpts;
+    const limit = opts.limit ?? 100;
+    const range = (opts.from || opts.to)
+      ? { fromIso: opts.from, toIso: opts.to }
+      : undefined;
     if (attentionRepo) {
-      const rows = attentionRepo.readAttention(executionId, limit);
+      const rows = attentionRepo.readAttention(executionId, limit, range);
       return rows.map((r) => this._rowToEntry(r));
     }
     const arr = this.byExec.get(executionId) ?? [];
+    let filtered = arr;
+    if (opts.from) filtered = filtered.filter((s) => s.entry.createdAt >= opts.from!);
+    if (opts.to)   filtered = filtered.filter((s) => s.entry.createdAt <  opts.to!);
     const cap = Math.max(1, Math.min(limit, this.maxEntries));
-    return arr.slice(-cap).map((s) => s.entry);
+    return filtered.slice(-cap).map((s) => s.entry);
   }
 
   size(): number {

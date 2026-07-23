@@ -84,17 +84,36 @@ export class HealthHistoryRepository {
   /**
    * Read up to `limit` snapshots for an execution, oldest-first
    * (so callers can hand them straight to analyzeHealthTrend).
+   *
+   * v1.6: optional `from` / `to` ISO bounds narrow the window. Both
+   * inclusive on `from`, exclusive on `to` (half-open interval).
+   * Undefined bounds mean "open on that side".
    */
-  readHealth(executionId: string, limit: number): HealthHistoryRow[] {
+  readHealth(
+    executionId: string,
+    limit: number,
+    range?: { fromIso?: string; toIso?: string },
+  ): HealthHistoryRow[] {
     const cap = Math.max(1, Math.min(limit, 5_000));
+    const where: string[] = ['execution_id = ?'];
+    const params: Array<string | number> = [executionId];
+    if (range?.fromIso) {
+      where.push('created_at >= ?');
+      params.push(range.fromIso);
+    }
+    if (range?.toIso) {
+      where.push('created_at < ?');
+      params.push(range.toIso);
+    }
+    params.push(cap);
     return this.db.raw.prepare(
       `SELECT * FROM (
          SELECT * FROM execution_health_history
-         WHERE execution_id = ?
+         WHERE ${where.join(' AND ')}
          ORDER BY id DESC
          LIMIT ?
        ) ORDER BY id ASC`,
-    ).all(executionId, cap) as HealthHistoryRow[];
+    ).all(...params) as HealthHistoryRow[];
   }
 
   /**
@@ -149,17 +168,35 @@ export class AttentionHistoryRepository {
    * `recovered`-only executions that have been re-detected
    * (current state = 'detected' or 'ongoing') are still returned
    * because we want the full history.
+   *
+   * v1.6: optional `from` / `to` ISO bounds narrow the window.
+   * Half-open: `from` inclusive, `to` exclusive.
    */
-  readAttention(executionId: string, limit: number): AttentionHistoryRow[] {
+  readAttention(
+    executionId: string,
+    limit: number,
+    range?: { fromIso?: string; toIso?: string },
+  ): AttentionHistoryRow[] {
     const cap = Math.max(1, Math.min(limit, 5_000));
+    const where: string[] = ['execution_id = ?'];
+    const params: Array<string | number> = [executionId];
+    if (range?.fromIso) {
+      where.push('created_at >= ?');
+      params.push(range.fromIso);
+    }
+    if (range?.toIso) {
+      where.push('created_at < ?');
+      params.push(range.toIso);
+    }
+    params.push(cap);
     return this.db.raw.prepare(
       `SELECT * FROM (
          SELECT * FROM execution_attention_history
-         WHERE execution_id = ?
+         WHERE ${where.join(' AND ')}
          ORDER BY id DESC
          LIMIT ?
        ) ORDER BY id ASC`,
-    ).all(executionId, cap) as AttentionHistoryRow[];
+    ).all(...params) as AttentionHistoryRow[];
   }
 
   /**

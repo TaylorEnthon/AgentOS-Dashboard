@@ -33,6 +33,7 @@ import {
   computeAgentReliability,
   healthHistoryStore,
 } from './health-history.js';
+import { detectHealthAnomalies } from './health-anomaly.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -913,7 +914,8 @@ export function registerRoutes(
   /* ---------------- v1.4: Health Memory & Trend ---------------- */
 
   // v1.4-a: per-execution health snapshot history.
-  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+  // v1.6: optional `from` / `to` ISO bounds narrow the window.
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; from?: string; to?: string } }>(
     '/api/executions/:id/health/history',
     async (req) => {
       const lastColon = req.params.id.lastIndexOf(':exec-');
@@ -921,12 +923,15 @@ export function registerRoutes(
       const sessionId = req.params.id.slice(0, lastColon);
       if (!db.getSession(sessionId)) return [];
       const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 100;
-      return healthHistoryStore.read(req.params.id, lim);
+      const opts: { limit: number; from?: string; to?: string } = { limit: lim };
+      if (req.query.from) opts.from = req.query.from;
+      if (req.query.to)   opts.to   = req.query.to;
+      return healthHistoryStore.read(req.params.id, opts);
     },
   );
 
   // v1.4-b: per-execution health trend (direction + delta + samples).
-  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; from?: string; to?: string } }>(
     '/api/executions/:id/health/trend',
     async (req) => {
       const lastColon = req.params.id.lastIndexOf(':exec-');
@@ -934,13 +939,17 @@ export function registerRoutes(
       const sessionId = req.params.id.slice(0, lastColon);
       if (!db.getSession(sessionId)) return [];
       const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 50;
-      const history = healthHistoryStore.read(req.params.id, lim);
+      const opts: { limit: number; from?: string; to?: string } = { limit: lim };
+      if (req.query.from) opts.from = req.query.from;
+      if (req.query.to)   opts.to   = req.query.to;
+      const history = healthHistoryStore.read(req.params.id, opts);
       return analyzeHealthTrend(history);
     },
   );
 
   // v1.4-c: per-execution attention lifecycle history.
-  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>(
+  // v1.6: optional `from` / `to` ISO bounds narrow the window.
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; from?: string; to?: string } }>(
     '/api/executions/:id/attention/history',
     async (req) => {
       const lastColon = req.params.id.lastIndexOf(':exec-');
@@ -948,7 +957,27 @@ export function registerRoutes(
       const sessionId = req.params.id.slice(0, lastColon);
       if (!db.getSession(sessionId)) return [];
       const lim = req.query.limit ? Math.max(1, Math.min(Number(req.query.limit), 200)) : 100;
-      return attentionHistoryStore.read(req.params.id, lim);
+      const opts: { limit: number; from?: string; to?: string } = { limit: lim };
+      if (req.query.from) opts.from = req.query.from;
+      if (req.query.to)   opts.to   = req.query.to;
+      return attentionHistoryStore.read(req.params.id, opts);
+    },
+  );
+
+  // v1.6: per-execution detected health anomalies (read-only, derived).
+  // Returns `HealthAnomaly[]` — pure-function output of detectHealthAnomalies.
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>(
+    '/api/executions/:id/health/anomalies',
+    async (req) => {
+      const lastColon = req.params.id.lastIndexOf(':exec-');
+      if (lastColon < 0) return [];
+      const sessionId = req.params.id.slice(0, lastColon);
+      if (!db.getSession(sessionId)) return [];
+      const opts: { limit: number; from?: string; to?: string } = { limit: 200 };
+      if (req.query.from) opts.from = req.query.from;
+      if (req.query.to)   opts.to   = req.query.to;
+      const history = healthHistoryStore.read(req.params.id, opts);
+      return detectHealthAnomalies(history, { nowMs: Date.now() });
     },
   );
 

@@ -691,6 +691,7 @@ export type AttentionAction =
   | 'archive'              // very old, no movement
   | 'confirm-completion'   // manual=done but no end_time / commit
   | 'monitor'              // generic — keep an eye on it
+  | 'investigate-anomaly'  // v1.6: health anomaly (score drop / level regression / rapid degradation)
   ;
 
 /**
@@ -824,4 +825,64 @@ export interface AgentReliabilitySummary {
 export function worseConfidence(a: ConfidenceLevel, b: ConfidenceLevel): ConfidenceLevel {
   const rank = { exact: 0, estimated: 1, unknown: 2 } as const;
   return rank[a] >= rank[b] ? a : b;
+}
+
+/* ---------------- v1.6: Health Anomaly ---------------- */
+
+/**
+ * Categories of health anomalies detected from the persisted
+ * HealthSnapshotHistory sequence. Pure-function output of
+ * `detectHealthAnomalies`. Severity is set per-row.
+ *
+ *   - score-drop        — adjacent snapshot's score fell by >= threshold
+ *   - level-regression  — level moved toward 'critical' (healthy→warning→critical)
+ *   - rapid-degradation — sliding window of N snapshots dropped by >= threshold
+ */
+export type HealthAnomalyKind = 'score-drop' | 'level-regression' | 'rapid-degradation';
+
+/**
+ * Severity rating of a single anomaly. Mirrors AttentionSeverity minus
+ * 'low' / 'medium' since anomalies only fire when something is wrong.
+ */
+export type HealthAnomalySeverity = 'high' | 'critical';
+
+/**
+ * One detected anomaly. Pure-function derived; never persisted.
+ *
+ * `executionId` is denormalized so the UI can render anomalies inline
+ * next to the execution that produced them.
+ */
+export interface HealthAnomaly {
+  executionId: string;
+  kind: HealthAnomalyKind;
+  severity: HealthAnomalySeverity;
+  /** Score at the start of the window that triggered the anomaly. */
+  fromScore: number;
+  /** Score at the end of the window that triggered the anomaly. */
+  toScore: number;
+  /** Level at the start; null if first snapshot. */
+  fromLevel: HealthLevel | null;
+  /** Level at the end. */
+  toLevel: HealthLevel;
+  /** ISO timestamp of the start of the window. */
+  fromAt: string;
+  /** ISO timestamp of the end of the window (when the anomaly fired). */
+  detectedAt: string;
+  /** Single-line human-readable explanation. */
+  message: string;
+}
+
+/**
+ * Window used by `detectHealthAnomalies`. All thresholds default to
+ * conservative values that minimize false positives on small N.
+ */
+export interface HealthAnomalyOptions {
+  /** Adjacent score drop that fires a 'score-drop' anomaly (default 30). */
+  scoreDropThreshold?: number;
+  /** Cumulative score drop across the rapid-degradation window (default 40). */
+  rapidDegradationThreshold?: number;
+  /** How many recent snapshots to consider for rapid-degradation (default 3). */
+  rapidDegradationWindow?: number;
+  /** Anomaly detection timestamp (test hook); defaults to Date.now(). */
+  nowMs?: number;
 }

@@ -115,6 +115,9 @@ export function ExecutionDetailPage() {
       {/* v1.4: attention lifecycle history */}
       <AttentionLifecycleBlock executionId={data.id} />
 
+      {/* v1.6: unified Health Timeline View (health + attention + anomalies) */}
+      <HealthTimelineView executionId={data.id} />
+
       {/* Commits produced by this execution */}
       <Card>
         <CardHeader>
@@ -904,5 +907,176 @@ function WorkspaceEditor({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/* ---------------- v1.6: Health Timeline View ----------------
+ *
+ * Read-only merge of:
+ *   - HealthSnapshotHistory rows
+ *   - AttentionHistoryEntry rows
+ *   - HealthAnomaly rows (derived, never persisted)
+ *
+ * Sorted oldest → newest (so the user can read top-to-bottom
+ * chronologically). UI is purely presentational — no mutations,
+ * no auto-actions.
+ */
+
+type TimelineEvent =
+  | { kind: 'health'; t: string; score: number; level: import('../lib/api').HealthLevel; derivedStatus: import('../lib/api').DerivedLifecycleStatus }
+  | { kind: 'attention'; t: string; lifecycle: import('../lib/api').AttentionLifecycleState; severity: import('../lib/api').AttentionSeverity; attentionKey: string; reason: string }
+  | { kind: 'anomaly'; t: string; severity: 'high' | 'critical'; anomalyKind: import('../lib/api').HealthAnomalyDto['kind']; message: string };
+
+function HealthTimelineView({ executionId }: { executionId: string }) {
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [from, setFrom] = useState<string>('');
+  const [to, setTo] = useState<string>('');
+  const [filter, setFilter] = useState<'all' | 'health' | 'attention' | 'anomaly'>('all');
+
+  const refresh = () => {
+    const range = (from || to) ? { from: from || undefined, to: to || undefined } : undefined;
+    Promise.all([
+      api.executionHealthHistory(executionId, { limit: 200, ...range }).catch(() => []),
+      api.executionAttentionHistory(executionId, { limit: 200, ...range }).catch(() => []),
+      api.executionHealthAnomalies(executionId, range).catch(() => []),
+    ])
+      .then(([h, a, an]) => {
+        const merged: TimelineEvent[] = [];
+        for (const x of h) merged.push({ kind: 'health', t: x.createdAt, score: x.score, level: x.level, derivedStatus: x.derivedStatus });
+        for (const x of a) merged.push({ kind: 'attention', t: x.createdAt, lifecycle: x.lifecycle, severity: x.severity, attentionKey: x.attentionKey, reason: x.reason });
+        for (const x of an) merged.push({ kind: 'anomaly', t: x.detectedAt, severity: x.severity, anomalyKind: x.kind, message: x.message });
+        merged.sort((p, q) => Date.parse(p.t) - Date.parse(q.t));
+        setEvents(merged);
+        setErr(null);
+      })
+      .catch((e) => setErr(String(e)));
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = () => { if (!cancelled) refresh(); };
+    run();
+    const t = setInterval(run, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [executionId, from, to]);
+
+  const visible = filter === 'all' ? events : events.filter((e) => e.kind === filter);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Health Timeline</CardTitle>
+        <CardDescription>
+          Unified chronological view of health snapshots, attention transitions,
+          and detected anomalies. Read-only.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-end gap-2 text-xs">
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">From</span>
+            <input
+              type="datetime-local"
+              value={from}
+              onChange={(e) => setFrom(e.target.value ? new Date(e.target.value).toISOString() : '')}
+              className="rounded border border-border bg-background px-2 py-1 text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">To</span>
+            <input
+              type="datetime-local"
+              value={to}
+              onChange={(e) => setTo(e.target.value ? new Date(e.target.value).toISOString() : '')}
+              className="rounded border border-border bg-background px-2 py-1 text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-0.5">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Filter</span>
+            <select
+              value={filter}
+              onChange={(e) => setFilter(e.target.value as typeof filter)}
+              className="rounded border border-border bg-background px-2 py-1 text-xs"
+            >
+              <option value="all">All</option>
+              <option value="health">Health</option>
+              <option value="attention">Attention</option>
+              <option value="anomaly">Anomaly</option>
+            </select>
+          </label>
+          <Button size="sm" variant="outline" onClick={() => { setFrom(''); setTo(''); }}>Clear range</Button>
+        </div>
+
+        {err && <p className="text-xs text-rose-600">{err}</p>}
+        {!err && visible.length === 0 && (
+          <p className="text-sm text-muted-foreground">No events in this window.</p>
+        )}
+        {visible.length > 0 && (
+          <ol className="relative space-y-1.5 border-l border-border pl-3">
+            {visible.map((e, i) => (
+              <li key={`${e.t}-${e.kind}-${i}`} className="text-xs">
+                <TimelineRow event={e} />
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TimelineRow({ event }: { event: TimelineEvent }) {
+  const time = <time className="font-mono text-[10px] tabular-nums text-muted-foreground">{formatRelative(event.t)}</time>;
+  if (event.kind === 'health') {
+    return (
+      <div className="flex flex-wrap items-baseline gap-2">
+        {time}
+        <Badge tone="muted" className="shrink-0 text-[10px] uppercase tracking-wider">health</Badge>
+        <span className="tabular-nums text-foreground/90">score {event.score}</span>
+        <Badge
+          tone={event.level === 'critical' ? 'danger' : event.level === 'warning' ? 'warning' : 'success'}
+          className="shrink-0 text-[10px] uppercase tracking-wider"
+        >
+          {event.level}
+        </Badge>
+        <span className="text-[10px] text-muted-foreground/80">{event.derivedStatus}</span>
+      </div>
+    );
+  }
+  if (event.kind === 'attention') {
+    return (
+      <div className="flex flex-wrap items-baseline gap-2">
+        {time}
+        <Badge tone="muted" className="shrink-0 text-[10px] uppercase tracking-wider">attention</Badge>
+        <span
+          className={cn(
+            'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+            event.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
+            event.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                              'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+          )}
+        >
+          {event.lifecycle}
+        </span>
+        <code className="font-mono text-[10px] text-muted-foreground">{event.attentionKey}</code>
+        <span className="truncate text-foreground/80" title={event.reason}>{event.reason}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-baseline gap-2">
+      {time}
+      <Badge tone="muted" className="shrink-0 text-[10px] uppercase tracking-wider">anomaly</Badge>
+      <Badge
+        tone={event.severity === 'critical' ? 'danger' : 'warning'}
+        className="shrink-0 text-[10px] uppercase tracking-wider"
+      >
+        {event.severity}
+      </Badge>
+      <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80">{event.anomalyKind}</span>
+      <span className="text-foreground/90">{event.message}</span>
+    </div>
   );
 }
