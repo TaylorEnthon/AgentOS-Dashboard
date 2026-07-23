@@ -731,6 +731,47 @@ export interface IncidentPrioritySummaryDto {
   computedAt: string;
 }
 
+/* v1.12: Incident Investigation */
+
+export interface InvestigationExecutionRowDto {
+  executionId: string;
+  agentType: string;
+  incidentCount: number;
+  activeCount: number;
+  worstSeverity: 'high' | 'critical';
+  lifecycleCounts: { detected: number; ongoing: number; recovered: number };
+  lastIncidentAt: string | null;
+}
+
+export interface InvestigationAgentRowDto {
+  agentType: string;
+  executionCount: number;
+  incidentCount: number;
+  activeCount: number;
+  recoveredCount: number;
+  criticalCount: number;
+  worstSeverity: 'high' | 'critical';
+  byKind: Array<{ kind: 'score-drop' | 'level-regression' | 'rapid-degradation'; incidentCount: number }>;
+}
+
+export interface IncidentInvestigationViewDto {
+  priority: IncidentPriorityInsightDto;
+  signal: IntelligenceSignalDto;
+  relatedIncidents: HealthIncidentDto[];
+  affectedExecutions: InvestigationExecutionRowDto[];
+  affectedAgents: InvestigationAgentRowDto[];
+  evidence: PriorityEvidenceDto[];
+  summary: {
+    totalRelatedIncidents: number;
+    activeCount: number;
+    recoveredCount: number;
+    criticalCount: number;
+    highCount: number;
+    timeRange: { since: string; until: string };
+  };
+  computedAt: string;
+}
+
 export interface IncidentSummaryDto {
   active: number;
   recovered: number;
@@ -1017,6 +1058,15 @@ export const api = {
     if (opts?.topN != null)           params.set('topN', String(opts.topN));
     const qs = params.toString();
     return http<IncidentPrioritySummaryDto>(`/api/incidents/priorities${qs ? `?${qs}` : ''}`);
+  },
+  incidentInvestigation: (priorityId: string, opts?: { since?: string; until?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.since) params.set('since', opts.since);
+    if (opts?.until) params.set('until', opts.until);
+    const qs = params.toString();
+    return http<IncidentInvestigationViewDto>(
+      `/api/incidents/investigation/${encodeURIComponent(priorityId)}${qs ? `?${qs}` : ''}`,
+    );
   },
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

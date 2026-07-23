@@ -50,6 +50,7 @@ import {
   summarizeWindow,
 } from './incident-temporal.js';
 import { buildPriorities } from './incident-priority.js';
+import { buildInvestigation } from './incident-investigation.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1305,6 +1306,60 @@ export function registerRoutes(
         sinceIso,
         untilIso,
       });
+    },
+  );
+
+  // v1.12: Investigation drilldown for a single priority. Returns
+  // IncidentInvestigationView with the priority, related incidents,
+  // affected executions/agents, evidence chain, and summary metrics.
+  // Read-only; no DB writes.
+  app.get<{ Params: { priorityId: string }; Querystring: { since?: string; until?: string } }>(
+    '/api/incidents/investigation/:priorityId',
+    async (req, reply) => {
+      const priorityId = decodeURIComponent(req.params.priorityId);
+      if (!priorityId || !priorityId.includes(':')) {
+        return reply.code(400).send({ error: 'invalid priorityId format (expected `kind:subjectKey`)' });
+      }
+      const now = Date.now();
+      const untilIso = req.query.until ?? new Date(now).toISOString();
+      const sinceIso = req.query.since ?? new Date(now - 24 * 60 * 60_000).toISOString();
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      // Re-run the same priority pipeline as /api/incidents/priorities
+      // so the priorityId actually exists in the current snapshot.
+      const summary = summarizeWindow(incidents, execToAgent, { sinceIso, untilIso });
+      const signals = detectIntelligenceSignals(incidents, execToAgent, {});
+      const agentTrends = buildAllAgentTrends(incidents, execToAgent, { sinceIso, untilIso });
+      const sinceMs = Date.parse(sinceIso);
+      const untilMs = Date.parse(untilIso);
+      const windowIncidents = incidents.filter((inc) => {
+        const t = Date.parse(inc.detectedAt);
+        return Number.isFinite(t) && t >= sinceMs && t < untilMs;
+      });
+      const priorities = buildPriorities({
+        signals: signals.signals,
+        agentTrends,
+        windowIncidents,
+        executionToAgent: execToAgent,
+        topN: 100,           // capture all priorities for the lookup
+        sinceIso,
+        untilIso,
+      });
+      // Carry the top-N list back to the caller only when no specific
+      // priorityId was matched — otherwise the priority is embedded
+      // inside the investigation view.
+      void summary;
+      const investigation = buildInvestigation({
+        priorityId,
+        priorities: priorities.priorities,
+        windowIncidents,
+        executionToAgent: execToAgent,
+        since: sinceIso,
+        until: untilIso,
+      });
+      if (!investigation) {
+        return reply.code(404).send({ error: 'priority not found in current snapshot' });
+      }
+      return investigation;
     },
   );
 

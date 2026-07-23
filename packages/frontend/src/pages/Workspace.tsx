@@ -555,7 +555,7 @@ function IncidentSection() {
               </div>
             )}
 
-            {/* v1.11: "Needs Attention Now" — top-N prioritized insights */}
+            {/* v1.11 + v1.12: "Needs Attention Now" — clickable priority rows with investigation drilldown */}
             {priorities && priorities.priorities.length > 0 && (
               <div>
                 <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
@@ -600,6 +600,7 @@ function IncidentSection() {
                           ))}
                         </ul>
                       </details>
+                      <InvestigationPanel priorityId={p.priorityId} subjectKey={p.subjectKey} subjectLabel={p.subjectLabel ?? p.subjectKey} />
                     </li>
                   ))}
                 </ul>
@@ -948,5 +949,147 @@ function LifecyclePill({
     <Badge tone={tone} className="text-[9px]" title={`derived (${confidence}) — see detail for reason`}>
       {label}
     </Badge>
+  );
+}
+
+/* ---------------- v1.12: Investigation Panel ----------------
+ *
+ * Lazy-loaded drilldown for a single Priority Insight. Renders:
+ *   - why-it-matters (priority.priorityLevel + priorityScore + reasons)
+ *   - which executions are affected (clickable → /executions/:id)
+ *   - which agents are involved (with per-kind breakdown)
+ *   - related incidents summary (count by lifecycle + severity)
+ *
+ * Read-only; no mutation; closes itself when re-clicked.
+ */
+function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
+  priorityId: string;
+  subjectKey: string;
+  subjectLabel: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<import('../lib/api').IncidentInvestigationViewDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = () => {
+    setOpen((prev) => {
+      const next = !prev;
+      if (next && !data) {
+        setLoading(true);
+        setErr(null);
+        api.incidentInvestigation(priorityId)
+          .then((d) => { setData(d); setLoading(false); })
+          .catch((e) => { setErr(String(e)); setLoading(false); });
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div className="text-[10px] text-muted-foreground">
+      <button
+        type="button"
+        onClick={toggle}
+        className="text-left text-[10px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+      >
+        {open ? '▾ hide investigation' : '▸ investigate'}
+      </button>
+      {open && (
+        <div className="mt-1 space-y-1 rounded border border-border bg-muted/30 p-2">
+          {loading && <p className="text-[10px]">Loading investigation…</p>}
+          {err && <p className="text-[10px] text-rose-600">Failed: {err}</p>}
+          {data && (
+            <>
+              <div className="flex flex-wrap gap-1 text-[10px]">
+                <Badge tone="muted">{data.summary.totalRelatedIncidents} incidents</Badge>
+                <Badge tone={data.summary.criticalCount > 0 ? 'danger' : 'muted'}>
+                  {data.summary.criticalCount} critical
+                </Badge>
+                <Badge tone="muted">{data.summary.activeCount} active</Badge>
+                <Badge tone="muted">{data.summary.recoveredCount} recovered</Badge>
+              </div>
+              {data.affectedExecutions.length > 0 && (
+                <div>
+                  <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Affected executions ({data.affectedExecutions.length})
+                  </h5>
+                  <ul className="mt-0.5 space-y-0.5 pl-2">
+                    {data.affectedExecutions.slice(0, 5).map((row) => (
+                      <li key={row.executionId} className="text-[10px] flex items-baseline gap-2">
+                        <Link
+                          to={`/executions/${encodeURIComponent(row.executionId)}`}
+                          className="font-mono text-foreground/90 hover:underline truncate flex-1"
+                          title={row.executionId}
+                        >
+                          {row.executionId}
+                        </Link>
+                        <span className="text-muted-foreground shrink-0">{row.agentType}</span>
+                        <Badge tone={row.worstSeverity === 'critical' ? 'danger' : 'warning'} className="text-[10px] uppercase shrink-0">
+                          {row.worstSeverity}
+                        </Badge>
+                        <span className="tabular-nums text-muted-foreground shrink-0">{row.incidentCount}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {data.affectedAgents.length > 0 && (
+                <div>
+                  <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Affected agents
+                  </h5>
+                  <ul className="mt-0.5 space-y-0.5 pl-2">
+                    {data.affectedAgents.map((row) => (
+                      <li key={row.agentType} className="text-[10px] flex items-baseline gap-2">
+                        <code className="text-foreground/90">{row.agentType}</code>
+                        <span className="text-muted-foreground shrink-0">
+                          {row.executionCount} exec · {row.incidentCount} inc
+                        </span>
+                        {row.criticalCount > 0 && (
+                          <span className="text-rose-700 dark:text-rose-400 tabular-nums shrink-0">
+                            {row.criticalCount} critical
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {data.relatedIncidents.length > 0 && (
+                <div>
+                  <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Related incidents ({data.relatedIncidents.length})
+                  </h5>
+                  <ul className="mt-0.5 space-y-0.5 pl-2">
+                    {data.relatedIncidents.slice(0, 5).map((inc) => (
+                      <li key={inc.incidentKey} className="text-[10px] flex items-baseline gap-2">
+                        <Link
+                          to={`/executions/${encodeURIComponent(inc.executionId)}`}
+                          className="font-mono text-foreground/90 hover:underline truncate flex-1"
+                          title={inc.executionId}
+                        >
+                          {inc.executionId}
+                        </Link>
+                        <span
+                          className={cn(
+                            'shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider',
+                            inc.lifecycle === 'recovered' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' :
+                            'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300',
+                          )}
+                        >
+                          {inc.lifecycle}
+                        </span>
+                        <span className="text-muted-foreground shrink-0">{inc.kind}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

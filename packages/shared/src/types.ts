@@ -1428,3 +1428,87 @@ export interface IncidentPrioritySummary {
   until: string;
   computedAt: string;
 }
+
+/* ---------------- v1.12: Incident Investigation Workflow ---------------- */
+
+/**
+ * Per-execution row in an IncidentInvestigationView. One row per
+ * distinct execution that contributed to the priority.
+ */
+export interface InvestigationExecutionRow {
+  executionId: string;
+  /** AgentType owning this execution (parsed from session.agent_id). */
+  agentType: string;
+  /** Number of related incidents in this execution. */
+  incidentCount: number;
+  /** Active incidents (lifecycle !== 'recovered') in this execution. */
+  activeCount: number;
+  /** Worst severity observed in this execution. */
+  worstSeverity: HealthAnomalySeverity;
+  /** Lifecycle breakdown: detected / ongoing / recovered counts. */
+  lifecycleCounts: {
+    detected: number;
+    ongoing: number;
+    recovered: number;
+  };
+  /** ISO timestamp of the most recent incident in this execution. */
+  lastIncidentAt: string | null;
+}
+
+/**
+ * Per-agent rollup in an IncidentInvestigationView.
+ */
+export interface InvestigationAgentRow {
+  agentType: string;
+  /** Number of distinct executions owned by this agent. */
+  executionCount: number;
+  /** Total incidents across the agent's executions. */
+  incidentCount: number;
+  /** Active incidents (lifecycle !== 'recovered'). */
+  activeCount: number;
+  /** Recovered incidents. */
+  recoveredCount: number;
+  /** Critical-severity incidents. */
+  criticalCount: number;
+  /** Worst severity observed. */
+  worstSeverity: HealthAnomalySeverity;
+  /** Per-kind breakdown of incidents. */
+  byKind: Array<{
+    kind: HealthAnomalyKind;
+    incidentCount: number;
+  }>;
+}
+
+/**
+ * One Incident Investigation View — the drilldown target for a
+ * single Priority Insight. Bundles the priority + the incidents that
+ * produced it + the executions/agents affected + a complete evidence
+ * chain + summary metrics.
+ *
+ * Pure-derived; deterministic; no DB writes. Returned by
+ * `GET /api/incidents/investigation/:priorityId`.
+ */
+export interface IncidentInvestigationView {
+  /** The priority insight this investigation belongs to. */
+  priority: IncidentPriorityInsight;
+  /** The original signal (passthrough for traceability). */
+  signal: IntelligenceSignal;
+  /** All related incidents (those that contributed to this priority). */
+  relatedIncidents: HealthIncident[];
+  /** Per-execution breakdown. */
+  affectedExecutions: InvestigationExecutionRow[];
+  /** Per-agent rollup. */
+  affectedAgents: InvestigationAgentRow[];
+  /** Evidence chain (same as priority.reasons, surfaced for convenience). */
+  evidence: PriorityEvidence[];
+  /** Summary metrics for the investigation. */
+  summary: {
+    totalRelatedIncidents: number;
+    activeCount: number;
+    recoveredCount: number;
+    criticalCount: number;
+    highCount: number;
+    timeRange: { since: string; until: string };
+  };
+  computedAt: string;
+}
