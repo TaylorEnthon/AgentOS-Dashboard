@@ -1222,12 +1222,20 @@ function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
  */
 function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
   const [report, setReport] = useState<import('../lib/api').IncidentInvestigationReportDto | null>(null);
+  const [actions, setActions] = useState<import('../lib/api').IncidentRecommendedActionBundleDto | null>(null);
+  const [actionsErr, setActionsErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     api.incidentReport(incidentKey)
       .then((d) => { if (!cancelled) setReport(d); })
       .catch((e) => { if (!cancelled) setErr(String(e)); });
+    // v1.16: lazily fetch recommended actions AFTER report arrives.
+    // We don't fetch actions until the report endpoint succeeds —
+    // otherwise we'd just 404 alongside the report anyway.
+    api.incidentActions(incidentKey)
+      .then((d) => { if (!cancelled) setActions(d); })
+      .catch((e) => { if (!cancelled) setActionsErr(String(e)); });
     return () => { cancelled = true; };
   }, [incidentKey]);
 
@@ -1241,6 +1249,9 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
     ? Math.round((history.recoveredCount / history.occurrenceCount) * 100) : 0;
   const avgLabel = history.averageDurationMs !== null ? formatDuration(history.averageDurationMs) : '—';
   const maxConfidencePct = Math.round(evidence.confidence * 100);
+
+  const toneForActionPriority = (p: 'high' | 'medium' | 'low'): 'danger' | 'warning' | 'muted' =>
+    p === 'high' ? 'danger' : p === 'medium' ? 'warning' : 'muted';
 
   return (
     <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
@@ -1276,6 +1287,32 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
           </span>
         </li>
       </ul>
+      {/* v1.16: Recommended Actions — derived from the report above. */}
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Suggested next steps
+      </h6>
+      {actionsErr && (
+        <p className="text-[10px] text-rose-600 mt-1">actions: {actionsErr}</p>
+      )}
+      {!actions && !actionsErr && (
+        <p className="text-[10px] text-muted-foreground mt-1">loading actions…</p>
+      )}
+      {actions && actions.hasActions && (
+        <ul className="mt-1 space-y-0.5">
+          {actions.actions.map((a, i) => (
+            <li key={`${a.type}-${i}`} className="flex items-baseline gap-2 text-[10px]">
+              <Badge tone={toneForActionPriority(a.priority)} className="shrink-0 uppercase">
+                {a.priority}
+              </Badge>
+              <span className="shrink-0 uppercase text-muted-foreground">{a.type}</span>
+              <span className="flex-1 text-foreground/90">{a.reason}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {actions && !actions.hasActions && (
+        <p className="text-[10px] text-muted-foreground mt-1">no suggested actions for this incident.</p>
+      )}
     </div>
   );
 }

@@ -54,6 +54,7 @@ import { buildInvestigation } from './incident-investigation.js';
 import { buildHistoricalContext, parseIncidentKey } from './incident-history.js';
 import { buildRootCauseEvidence } from './incident-evidence.js';
 import { buildInvestigationReport } from './incident-report.js';
+import { buildRecommendedActions } from './incident-actions.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1440,96 +1441,132 @@ export function registerRoutes(
     '/api/incidents/:incidentKey/report',
     async (req, reply) => {
       const incidentKey = decodeURIComponent(req.params.incidentKey);
-      const parsed = parseIncidentKey(incidentKey);
-      if (!parsed) {
+      if (!parseIncidentKey(incidentKey)) {
+        return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
+      }
+      const now = Date.now();
+      const report = await buildReportForIncident(incidentKey, now);
+      if (!report) {
+        return reply.code(404).send({ error: 'incident not found or no matching priority' });
+      }
+      return report;
+    },
+  );
+
+  /**
+   * v1.15/v1.16 internal: build the full IncidentInvestigationReport for
+   * a single incidentKey. Shared by `/report` and `/actions` routes —
+   * encapsulates the priorities-pipeline match that turns an
+   * incidentKey into a priorityId.
+   *
+   * Returns null when:
+   *   - incidentKey format is invalid (caller → 400)
+   *   - current incident is not in the pool (caller → 404)
+   *   - no matching priority fires in the current snapshot (caller → 404)
+   *   - priority matches but buildInvestigation returns null (defensive; → 404)
+   */
+  async function buildReportForIncident(
+    incidentKey: string,
+    nowMs: number,
+  ): Promise<import('@agentos/shared').IncidentInvestigationReport | null> {
+    const parsed = parseIncidentKey(incidentKey);
+    if (!parsed) return null;
+    const nowIso = new Date(nowMs).toISOString();
+    const sinceIso = new Date(nowMs - 24 * 60 * 60_000).toISOString();
+    const { incidents, execToAgent } = await collectAllIncidents(db);
+
+    const history = buildHistoricalContext({ incidentKey, allIncidents: incidents, nowIso });
+    if (!history) return null;
+
+    const evidence = buildRootCauseEvidence({
+      incidentKey,
+      allIncidents: incidents,
+      history,
+      executionToAgent: execToAgent,
+      nowIso,
+    });
+    if (!evidence) return null;
+
+    const sinceMs = Date.parse(sinceIso);
+    const untilMs = Date.parse(nowIso);
+    const windowIncidents = incidents.filter((inc) => {
+      const t = Date.parse(inc.detectedAt);
+      return Number.isFinite(t) && t >= sinceMs && t < untilMs;
+    });
+    const summary = summarizeWindow(incidents, execToAgent, { sinceIso, untilIso: nowIso });
+    const signals = detectIntelligenceSignals(incidents, execToAgent, { nowMs });
+    const agentTrends = buildAllAgentTrends(incidents, execToAgent, {
+      sinceIso,
+      untilIso: nowIso,
+      nowMs,
+    });
+    const priorities = buildPriorities({
+      signals: signals.signals,
+      agentTrends,
+      windowIncidents,
+      executionToAgent: execToAgent,
+      topN: 100,
+      sinceIso,
+      untilIso: nowIso,
+      nowMs,
+    });
+    void summary;
+
+    const current = incidents.find((i) => i.incidentKey === incidentKey);
+    const currentAgent = current ? execToAgent.get(current.executionId) : undefined;
+    const candidate = priorities.priorities.find((p) => {
+      if (p.signalKind === 'burst' || p.signalKind === 'kind-surge') {
+        return p.subjectKey === parsed.kind;
+      }
+      return currentAgent !== undefined && p.subjectKey === currentAgent;
+    });
+    if (!candidate) return null;
+
+    const investigation = buildInvestigation({
+      priorityId: candidate.priorityId,
+      priorities: priorities.priorities,
+      windowIncidents,
+      executionToAgent: execToAgent,
+      since: sinceIso,
+      until: nowIso,
+      nowMs,
+    });
+    if (!investigation) return null;
+
+    return buildInvestigationReport({
+      incidentKey,
+      investigation,
+      history,
+      evidence,
+      nowIso,
+    });
+  }
+
+  // v1.15: Unified investigation report for a single incident.
+  // (moved below to share the helper)
+  // Note: keep the route registration here for code-locality with v1.14.
+  // The helper above is the actual implementation.
+
+  // v1.16: Recommended actions for a single incident — derived from
+  // the IncidentInvestigationReport. Deterministic suggestion list; never
+  // auto-executed. Read-only; no DB writes.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey/actions',
+    async (req, reply) => {
+      const incidentKey = decodeURIComponent(req.params.incidentKey);
+      if (!parseIncidentKey(incidentKey)) {
         return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
       }
       const now = Date.now();
       const nowIso = new Date(now).toISOString();
-      const sinceIso = new Date(now - 24 * 60 * 60_000).toISOString();
-      const { incidents, execToAgent } = await collectAllIncidents(db);
-
-      // 1) v1.13 history (cheap, no priorities pipeline needed)
-      const history = buildHistoricalContext({ incidentKey, allIncidents: incidents, nowIso });
-      if (!history) return reply.code(404).send({ error: 'incident not found in current pool' });
-
-      // 2) v1.14 evidence (reuses history; no priority passed → evidence.priority is null)
-      const evidence = buildRootCauseEvidence({
-        incidentKey,
-        allIncidents: incidents,
-        history,
-        executionToAgent: execToAgent,
-        nowIso,
-      });
-      if (!evidence) return reply.code(404).send({ error: 'incident not found in current pool' });
-
-      // 3) v1.12 investigation view — must find a matching priority for this incident.
-      //    Run the same priority pipeline as /api/incidents/priorities.
-      const sinceMs = Date.parse(sinceIso);
-      const untilMs = Date.parse(nowIso);
-      const windowIncidents = incidents.filter((inc) => {
-        const t = Date.parse(inc.detectedAt);
-        return Number.isFinite(t) && t >= sinceMs && t < untilMs;
-      });
-      const summary = summarizeWindow(incidents, execToAgent, { sinceIso, untilIso: nowIso });
-      const signals = detectIntelligenceSignals(incidents, execToAgent, { nowMs: now });
-      const agentTrends = buildAllAgentTrends(incidents, execToAgent, {
-        sinceIso,
-        untilIso: nowIso,
-        nowMs: now,
-      });
-      const priorities = buildPriorities({
-        signals: signals.signals,
-        agentTrends,
-        windowIncidents,
-        executionToAgent: execToAgent,
-        topN: 100,
-        sinceIso,
-        untilIso: nowIso,
-        nowMs: now,
-      });
-      void summary;
-
-      // Match: kind-keyed signals (burst / kind-surge) → subjectKey === incident.kind
-      //        agent-keyed signals (agent-degradation / recovery-surge) → subjectKey === agent
-      const current = incidents.find((i) => i.incidentKey === incidentKey);
-      const currentAgent = current ? execToAgent.get(current.executionId) : undefined;
-      const candidate = priorities.priorities.find((p) => {
-        if (p.signalKind === 'burst' || p.signalKind === 'kind-surge') {
-          return p.subjectKey === parsed.kind;
-        }
-        return currentAgent !== undefined && p.subjectKey === currentAgent;
-      });
-
-      if (!candidate) {
-        return reply.code(404).send({ error: 'no matching priority for this incident in current snapshot' });
+      const report = await buildReportForIncident(incidentKey, now);
+      if (!report) return reply.code(404).send({ error: 'incident not found or no matching priority' });
+      const bundle = buildRecommendedActions({ report, nowIso });
+      if (!bundle) {
+        // Defensive — should not happen since report is non-null.
+        return reply.code(404).send({ error: 'failed to assemble actions' });
       }
-      const investigation = buildInvestigation({
-        priorityId: candidate.priorityId,
-        priorities: priorities.priorities,
-        windowIncidents,
-        executionToAgent: execToAgent,
-        since: sinceIso,
-        until: nowIso,
-        nowMs: now,
-      });
-      if (!investigation) {
-        return reply.code(404).send({ error: 'failed to build investigation view for matched priority' });
-      }
-
-      // 4) v1.15 aggregation
-      const report = buildInvestigationReport({
-        incidentKey,
-        investigation,
-        history,
-        evidence,
-        nowIso,
-      });
-      if (!report) {
-        // Should not happen — all three inputs are non-null.
-        return reply.code(404).send({ error: 'failed to assemble report' });
-      }
-      return report;
+      return bundle;
     },
   );
 

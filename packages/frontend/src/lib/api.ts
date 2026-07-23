@@ -680,6 +680,29 @@ export interface IncidentInvestigationReportDto {
   generatedAt: string;
 }
 
+/* v1.16: Incident Recommended Action */
+
+export type IncidentRecommendedActionTypeDto =
+  | 'inspect-agent'
+  | 'review-execution'
+  | 'compare-history'
+  | 'watch-recurrence';
+
+export type IncidentRecommendedActionPriorityDto = 'high' | 'medium' | 'low';
+
+export interface IncidentRecommendedActionDto {
+  type: IncidentRecommendedActionTypeDto;
+  priority: IncidentRecommendedActionPriorityDto;
+  reason: string;
+}
+
+export interface IncidentRecommendedActionBundleDto {
+  incidentKey: string;
+  actions: IncidentRecommendedActionDto[];
+  hasActions: boolean;
+  generatedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1134,6 +1157,10 @@ export const api = {
   incidentReport: (incidentKey: string) =>
     http<IncidentInvestigationReportDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/report`,
+    ),
+  incidentActions: (incidentKey: string) =>
+    http<IncidentRecommendedActionBundleDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/actions`,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
