@@ -1138,3 +1138,175 @@ export interface IncidentCorrelationSummary {
   topKind: HealthAnomalyKind | null;
   computedAt: string;
 }
+
+/* ---------------- v1.10: Incident Temporal Intelligence ---------------- */
+
+/**
+ * Trend direction for a single agent's incident stream. Pure-derived
+ * by comparing the [since, until] window against the immediately
+ * preceding window of the same duration.
+ *
+ *   - 'improving'  : current window shows fewer incidents and/or
+ *                     fewer active incidents than the previous window
+ *   - 'degrading'  : current window shows more incidents and/or
+ *                     more critical incidents than the previous window
+ *   - 'stable'     : neither signal crosses the configurable threshold
+ *                     (default 20%)
+ *   - 'no-data'    : no incidents in either window (cannot decide)
+ */
+export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
+
+/**
+ * Per-agent reliability trend for a single time window. Includes a
+ * comparison against the immediately preceding window so the UI can
+ * answer "is this agent getting worse?".
+ *
+ * Pure-derived; deterministic; no DB writes.
+ */
+export interface AgentReliabilityTrend {
+  agentType: string;
+  /** ISO timestamp of the window start. */
+  since: string;
+  /** ISO timestamp of the window end (exclusive). */
+  until: string;
+  /** Window duration in ms (= until - since). */
+  windowMs: number;
+  /** Number of distinct executions owned by this agent in the window. */
+  executionCount: number;
+  /** Number of distinct executions that have ≥1 incident in the window. */
+  affectedExecutions: number;
+  /** Total incidents in the window. */
+  incidentCount: number;
+  /** Active incidents (lifecycle !== 'recovered') in the window. */
+  activeCount: number;
+  /** Recovered incidents (lifecycle === 'recovered') in the window. */
+  recoveredCount: number;
+  /** Critical-severity incidents in the window. */
+  criticalCount: number;
+  /** High-severity incidents in the window. */
+  highCount: number;
+  /** Total severity escalations across the window. */
+  totalEscalations: number;
+  /** Worst severity observed in the window. */
+  worstSeverity: HealthAnomalySeverity;
+  /**
+   * Incidents per affected execution (≥1.0). Useful as a
+   * "concentration" signal — values >1 mean an execution has
+   * multiple incidents in the window.
+   */
+  degradationRate: number;
+  /** Direction computed by comparing current vs previous window. */
+  trendDirection: TrendDirection;
+  /** Incident delta vs previous window (positive = more incidents now). */
+  incidentDelta: number;
+  /** Critical-incident delta vs previous window. */
+  criticalDelta: number;
+  /** Whether this agent appears in the workspace's top-N "degrading" list. */
+  rankByIncidentCount: number | null;
+}
+
+/**
+ * Workspace-level temporal snapshot over a time window.
+ * Returned by `/api/incidents/temporal`.
+ */
+export interface IncidentTemporalSummary {
+  /** ISO timestamp of the window start. */
+  since: string;
+  /** ISO timestamp of the window end (exclusive). */
+  until: string;
+  /** Window duration in ms. */
+  windowMs: number;
+  /** Total incidents whose detectedAt falls in [since, until). */
+  incidentCount: number;
+  /** Active incidents in the window (lifecycle !== 'recovered'). */
+  activeCount: number;
+  /** Recovered incidents in the window. */
+  recoveredCount: number;
+  /** Critical-severity incidents in the window. */
+  criticalCount: number;
+  /** High-severity incidents in the window. */
+  highCount: number;
+  /** Severity distribution: { critical, high } counts. */
+  severityDistribution: {
+    critical: number;
+    high: number;
+  };
+  /** Distribution across anomaly kinds (incidentCount per kind). */
+  byKind: Array<{
+    kind: HealthAnomalyKind;
+    incidentCount: number;
+  }>;
+  /** Distribution across agents (incidentCount per agent). */
+  byAgent: Array<{
+    agentType: string;
+    incidentCount: number;
+  }>;
+  /** Incident density per hour (incidentCount / windowMs × 3_600_000). */
+  densityPerHour: number;
+  computedAt: string;
+}
+
+/**
+ * Signal categories for intelligence insights. v1.10 supports:
+ *   - 'burst'               — short-window spike of the same kind
+ *   - 'agent-degradation'   — multiple executions of one agent in window
+ *   - 'kind-surge'          — a kind frequency rising vs previous window
+ *   - 'recovery-surge'      — many incidents resolving at once
+ *
+ * Signals are pure-derived observations; they are NOT incidents
+ * and never modify incident lifecycle.
+ */
+export type IntelligenceSignalKind =
+  | 'burst'
+  | 'agent-degradation'
+  | 'kind-surge'
+  | 'recovery-surge';
+
+/**
+ * Severity of an intelligence signal. Used by the UI to color-code
+ * the signal row (informational vs needs attention).
+ */
+export type IntelligenceSignalSeverity = 'info' | 'warn' | 'alert';
+
+/**
+ * One intelligence signal. Emitted by `detectIntelligenceSignals` for
+ * a given incident set + time window.
+ *
+ * Signals are pure observations. They never trigger execution,
+ * auto-mitigation, or lifecycle mutation.
+ */
+export interface IntelligenceSignal {
+  /** Stable id: `${kind}:${subjectKey}`. */
+  signalId: string;
+  /** Signal category. */
+  kind: IntelligenceSignalKind;
+  /** UI severity tag. */
+  severity: IntelligenceSignalSeverity;
+  /** Subject key (agent type, kind, or composite). */
+  subjectKey: string;
+  /** Optional human-readable label (e.g. "claude-code:score-drop"). */
+  subjectLabel?: string;
+  /** ISO timestamp of the window start. */
+  since: string;
+  /** ISO timestamp of the window end. */
+  until: string;
+  /** Numeric score (interpretation depends on `kind`). */
+  score: number;
+  /** Threshold that triggered the signal (for explainability). */
+  threshold: number;
+  /** One-line human-readable description. */
+  description: string;
+}
+
+/**
+ * Workspace-level signal bundle returned alongside
+ * IncidentTemporalSummary.
+ */
+export interface IntelligenceSignalSummary {
+  signals: IntelligenceSignal[];
+  /** Highest severity observed across signals. */
+  highestSeverity: IntelligenceSignalSeverity | null;
+  /** Total signal count. */
+  totalCount: number;
+  computedAt: string;
+}

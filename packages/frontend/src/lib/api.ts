@@ -625,6 +625,72 @@ export interface AgentIncidentBundleDto {
   computedAt: string;
 }
 
+/* v1.10: Incident Temporal Intelligence */
+
+export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
+
+export interface AgentReliabilityTrendDto {
+  agentType: string;
+  since: string;
+  until: string;
+  windowMs: number;
+  executionCount: number;
+  affectedExecutions: number;
+  incidentCount: number;
+  activeCount: number;
+  recoveredCount: number;
+  criticalCount: number;
+  highCount: number;
+  totalEscalations: number;
+  worstSeverity: 'high' | 'critical';
+  degradationRate: number;
+  trendDirection: TrendDirection;
+  incidentDelta: number;
+  criticalDelta: number;
+  rankByIncidentCount: number | null;
+}
+
+export interface IncidentTemporalSummaryDto {
+  since: string;
+  until: string;
+  windowMs: number;
+  incidentCount: number;
+  activeCount: number;
+  recoveredCount: number;
+  criticalCount: number;
+  highCount: number;
+  severityDistribution: { critical: number; high: number };
+  byKind: Array<{ kind: 'score-drop' | 'level-regression' | 'rapid-degradation'; incidentCount: number }>;
+  byAgent: Array<{ agentType: string; incidentCount: number }>;
+  densityPerHour: number;
+  computedAt: string;
+}
+
+export type IntelligenceSignalKind = 'burst' | 'agent-degradation' | 'kind-surge' | 'recovery-surge';
+export type IntelligenceSignalSeverity = 'info' | 'warn' | 'alert';
+
+export interface IntelligenceSignalDto {
+  signalId: string;
+  kind: IntelligenceSignalKind;
+  severity: IntelligenceSignalSeverity;
+  subjectKey: string;
+  subjectLabel?: string;
+  since: string;
+  until: string;
+  score: number;
+  threshold: number;
+  description: string;
+}
+
+export interface IncidentTemporalBundleDto extends IncidentTemporalSummaryDto {
+  signals: {
+    signals: IntelligenceSignalDto[];
+    highestSeverity: IntelligenceSignalSeverity | null;
+    totalCount: number;
+    computedAt: string;
+  };
+}
+
 export interface IncidentSummaryDto {
   active: number;
   recovered: number;
@@ -872,6 +938,29 @@ export const api = {
   },
   agentIncidents: (agentType: string) =>
     http<AgentIncidentBundleDto>(`/api/agents/${encodeURIComponent(agentType)}/incidents`),
+  agentTrend: (agentType: string, opts?: { since?: string; until?: string; threshold?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.since)     params.set('since', opts.since);
+    if (opts?.until)     params.set('until', opts.until);
+    if (opts?.threshold != null) params.set('threshold', String(opts.threshold));
+    const qs = params.toString();
+    return http<AgentReliabilityTrendDto>(`/api/agents/${encodeURIComponent(agentType)}/trend${qs ? `?${qs}` : ''}`);
+  },
+  incidentTemporal: (opts?: {
+    since?: string; until?: string;
+    burstWindowMs?: number; burstThreshold?: number;
+    agentWindowMs?: number; agentThreshold?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts?.since)          params.set('since', opts.since);
+    if (opts?.until)          params.set('until', opts.until);
+    if (opts?.burstWindowMs != null)  params.set('burstWindowMs', String(opts.burstWindowMs));
+    if (opts?.burstThreshold != null) params.set('burstThreshold', String(opts.burstThreshold));
+    if (opts?.agentWindowMs != null)  params.set('agentWindowMs', String(opts.agentWindowMs));
+    if (opts?.agentThreshold != null) params.set('agentThreshold', String(opts.agentThreshold));
+    const qs = params.toString();
+    return http<IncidentTemporalBundleDto>(`/api/incidents/temporal${qs ? `?${qs}` : ''}`);
+  },
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
 };

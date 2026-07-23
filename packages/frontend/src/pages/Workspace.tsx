@@ -470,6 +470,7 @@ function AttentionQueueSection({ items }: { items: AttentionItemDto[] }) {
 function IncidentSection() {
   const [data, setData] = useState<import('../lib/api').IncidentSummaryDto | null>(null);
   const [corr, setCorr] = useState<import('../lib/api').IncidentCorrelationSummaryDto | null>(null);
+  const [temporal, setTemporal] = useState<import('../lib/api').IncidentTemporalBundleDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -477,8 +478,9 @@ function IncidentSection() {
     const load = () => Promise.all([
       api.incidentSummary({ topAffectedLimit: 5, recentRecoveredLimit: 5 }),
       api.incidentCorrelations(),
+      api.incidentTemporal(),  // v1.10: 24h window + intelligence signals
     ])
-      .then(([d, c]) => { if (!cancelled) { setData(d); setCorr(c); setErr(null); } })
+      .then(([d, c, t]) => { if (!cancelled) { setData(d); setCorr(c); setTemporal(t); setErr(null); } })
       .catch((e) => { if (!cancelled) setErr(String(e)); });
     load();
     const t = setInterval(load, 30_000);
@@ -490,10 +492,10 @@ function IncidentSection() {
       <CardHeader className="pb-2">
         <CardTitle>Health Incidents</CardTitle>
         <CardDescription>
-          Anomaly-driven health incidents (score drops / level regressions /
-          rapid degradation) tracked through detected → ongoing → recovered.
-          v1.9 adds cross-incident correlation (per-agent / per-kind / combined).
-          Read-only.
+          Anomaly-driven health incidents tracked through detected → ongoing →
+          recovered. v1.9 adds cross-incident correlation; v1.10 adds 24h
+          temporal view, intelligence signals (burst / agent-degradation / recovery
+          surge), and per-agent trend direction. Read-only.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -547,6 +549,86 @@ function IncidentSection() {
                     </li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {/* v1.10: Intelligence signals (burst / agent-degradation / recovery-surge) */}
+            {temporal && temporal.signals.signals.length > 0 && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Intelligence signals
+                </h4>
+                <ul className="space-y-1">
+                  {temporal.signals.signals.slice(0, 5).map((s) => (
+                    <li key={s.signalId} className="flex items-baseline gap-2 text-xs">
+                      <Badge
+                        tone={s.severity === 'alert' ? 'danger' : s.severity === 'warn' ? 'warning' : 'muted'}
+                        className="text-[10px] uppercase shrink-0"
+                      >
+                        {s.kind}
+                      </Badge>
+                      <span className="font-mono text-[11px] text-foreground/90 truncate flex-1" title={s.subjectLabel ?? s.subjectKey}>
+                        {s.subjectLabel ?? s.subjectKey}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+                        {s.score}/{s.threshold}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground truncate flex-1" title={s.description}>
+                        {s.description}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* v1.10: 24h trend + top degrading agents */}
+            {temporal && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Last 24h
+                </h4>
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <Badge tone="muted" className="text-[10px]">{temporal.incidentCount} total</Badge>
+                  <Badge tone={temporal.criticalCount > 0 ? 'danger' : 'muted'} className="text-[10px]">
+                    {temporal.criticalCount} critical
+                  </Badge>
+                  <Badge tone="muted" className="text-[10px]">{temporal.activeCount} active</Badge>
+                  <Badge tone="muted" className="text-[10px]">{temporal.recoveredCount} recovered</Badge>
+                  <Badge tone="muted" className="text-[10px]">
+                    {temporal.densityPerHour.toFixed(2)}/h
+                  </Badge>
+                </div>
+                {temporal.byAgent.length > 0 && (
+                  <div className="mt-2">
+                    <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                      Top agents (24h)
+                    </h5>
+                    <ul className="space-y-1">
+                      {temporal.byAgent.slice(0, 3).map((a) => (
+                        <li key={a.agentType} className="flex items-baseline gap-2 text-xs">
+                          <code className="font-mono text-[11px] text-foreground/90">{a.agentType}</code>
+                          <span className="tabular-nums text-muted-foreground">{a.incidentCount}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {temporal.byKind.length > 0 && (
+                  <div className="mt-2">
+                    <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                      Top kinds (24h)
+                    </h5>
+                    <ul className="space-y-1">
+                      {temporal.byKind.slice(0, 3).map((k) => (
+                        <li key={k.kind} className="flex items-baseline gap-2 text-xs">
+                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{k.kind}</span>
+                          <span className="tabular-nums text-muted-foreground">{k.incidentCount}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
 

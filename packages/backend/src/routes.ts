@@ -43,6 +43,12 @@ import {
   buildCorrelations,
   buildExecutionToAgentMap,
 } from './incident-correlation.js';
+import {
+  buildAgentTrend,
+  buildAllAgentTrends,
+  detectIntelligenceSignals,
+  summarizeWindow,
+} from './incident-temporal.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1191,6 +1197,63 @@ export function registerRoutes(
         incidents: filtered,
         computedAt: new Date().toISOString(),
       };
+    },
+  );
+
+  // v1.10: Per-agent reliability trend over [sinceIso, untilIso).
+  // Compares the current window against the immediately preceding
+  // window of the same duration to derive a direction (improving /
+  // stable / degrading / no-data).
+  app.get<{ Params: { agentType: string }; Querystring: { since?: string; until?: string; threshold?: string } }>(
+    '/api/agents/:agentType/trend',
+    async (req, reply) => {
+      const agentType = decodeURIComponent(req.params.agentType);
+      const valid: ReadonlyArray<string> = ['claude-code', 'codex', 'grok', 'gemini', 'hermes', 'custom'];
+      if (!valid.includes(agentType)) {
+        return reply.code(400).send({ error: 'invalid agentType', allowed: valid });
+      }
+      const now = Date.now();
+      const untilIso = req.query.until ?? new Date(now).toISOString();
+      const sinceIso = req.query.since ?? new Date(now - 24 * 60 * 60_000).toISOString();
+      const threshold = req.query.threshold
+        ? Math.max(0, Math.min(Number(req.query.threshold), 1))
+        : undefined;
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      const trend = buildAgentTrend(agentType, incidents, execToAgent, {
+        sinceIso,
+        untilIso,
+        trendChangeThreshold: threshold,
+      });
+      return trend;
+    },
+  );
+
+  // v1.10: Workspace-level temporal snapshot. Returns aggregate
+  // counts + intelligence signals (burst, agent-degradation, recovery-surge)
+  // for a single time window.
+  app.get<{ Querystring: {
+    since?: string; until?: string;
+    burstWindowMs?: string; burstThreshold?: string;
+    agentWindowMs?: string; agentThreshold?: string;
+  } }>(
+    '/api/incidents/temporal',
+    async (req) => {
+      const now = Date.now();
+      const untilIso = req.query.until ?? new Date(now).toISOString();
+      const sinceIso = req.query.since ?? new Date(now - 24 * 60 * 60_000).toISOString();
+      const burstWindowMs = req.query.burstWindowMs ? Math.max(60_000, Number(req.query.burstWindowMs)) : undefined;
+      const burstThreshold = req.query.burstThreshold ? Math.max(1, Number(req.query.burstThreshold)) : undefined;
+      const agentWindowMs = req.query.agentWindowMs ? Math.max(60_000, Number(req.query.agentWindowMs)) : undefined;
+      const agentThreshold = req.query.agentThreshold ? Math.max(1, Number(req.query.agentThreshold)) : undefined;
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      const summary = summarizeWindow(incidents, execToAgent, { sinceIso, untilIso });
+      const signals = detectIntelligenceSignals(incidents, execToAgent, {
+        burstWindowMs,
+        burstThreshold,
+        agentWindowMs,
+        agentThreshold,
+      });
+      return { ...summary, signals };
     },
   );
 
