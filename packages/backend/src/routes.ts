@@ -49,6 +49,7 @@ import {
   detectIntelligenceSignals,
   summarizeWindow,
 } from './incident-temporal.js';
+import { buildPriorities } from './incident-priority.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1254,6 +1255,56 @@ export function registerRoutes(
         agentThreshold,
       });
       return { ...summary, signals };
+    },
+  );
+
+  // v1.11: Workspace-level priority ranking. Combines signals from
+  // /api/incidents/temporal + agent trends + window summary into a
+  // single ranked list with evidence chain. Read-only.
+  app.get<{ Querystring: {
+    since?: string; until?: string;
+    burstWindowMs?: string; burstThreshold?: string;
+    agentWindowMs?: string; agentThreshold?: string;
+    topN?: string;
+  } }>(
+    '/api/incidents/priorities',
+    async (req) => {
+      const now = Date.now();
+      const untilIso = req.query.until ?? new Date(now).toISOString();
+      const sinceIso = req.query.since ?? new Date(now - 24 * 60 * 60_000).toISOString();
+      const burstWindowMs = req.query.burstWindowMs ? Math.max(60_000, Number(req.query.burstWindowMs)) : undefined;
+      const burstThreshold = req.query.burstThreshold ? Math.max(1, Number(req.query.burstThreshold)) : undefined;
+      const agentWindowMs = req.query.agentWindowMs ? Math.max(60_000, Number(req.query.agentWindowMs)) : undefined;
+      const agentThreshold = req.query.agentThreshold ? Math.max(1, Number(req.query.agentThreshold)) : undefined;
+      const topN = req.query.topN ? Math.max(1, Math.min(Number(req.query.topN), 100)) : 10;
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      const summary = summarizeWindow(incidents, execToAgent, { sinceIso, untilIso });
+      const signals = detectIntelligenceSignals(incidents, execToAgent, {
+        burstWindowMs,
+        burstThreshold,
+        agentWindowMs,
+        agentThreshold,
+      });
+      const agentTrends = buildAllAgentTrends(incidents, execToAgent, {
+        sinceIso,
+        untilIso,
+      });
+      // Filter window incidents to the time window for impact metrics.
+      const sinceMs = Date.parse(sinceIso);
+      const untilMs = Date.parse(untilIso);
+      const windowIncidents = incidents.filter((inc) => {
+        const t = Date.parse(inc.detectedAt);
+        return Number.isFinite(t) && t >= sinceMs && t < untilMs;
+      });
+      return buildPriorities({
+        signals: signals.signals,
+        agentTrends,
+        windowIncidents,
+        executionToAgent: execToAgent,
+        topN,
+        sinceIso,
+        untilIso,
+      });
     },
   );
 

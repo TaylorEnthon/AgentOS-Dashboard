@@ -691,6 +691,46 @@ export interface IncidentTemporalBundleDto extends IncidentTemporalSummaryDto {
   };
 }
 
+/* v1.11: Incident Intelligence Prioritization */
+
+export type PriorityLevel = 'critical' | 'high' | 'medium' | 'low';
+export type PriorityEvidenceKind = 'severity' | 'frequency' | 'impact' | 'trend' | 'base';
+
+export interface PriorityEvidenceDto {
+  kind: PriorityEvidenceKind;
+  contribution: number;
+  maxContribution: number;
+  message: string;
+}
+
+export interface IncidentPriorityInsightDto {
+  priorityId: string;
+  signalKind: IntelligenceSignalKind;
+  signalSeverity: IntelligenceSignalSeverity;
+  subjectKey: string;
+  subjectLabel?: string;
+  signalId: string;
+  signalScore: number;
+  signalThreshold: number;
+  signalDescription: string;
+  since: string;
+  until: string;
+  priorityScore: number;
+  priorityLevel: PriorityLevel;
+  reasons: PriorityEvidenceDto[];
+  trendHint: 'improving' | 'stable' | 'degrading' | 'no-data' | null;
+}
+
+export interface IncidentPrioritySummaryDto {
+  priorities: IncidentPriorityInsightDto[];
+  highestLevel: PriorityLevel | null;
+  byLevel: Record<PriorityLevel, number>;
+  totalCount: number;
+  since: string;
+  until: string;
+  computedAt: string;
+}
+
 export interface IncidentSummaryDto {
   active: number;
   recovered: number;
@@ -960,6 +1000,23 @@ export const api = {
     if (opts?.agentThreshold != null) params.set('agentThreshold', String(opts.agentThreshold));
     const qs = params.toString();
     return http<IncidentTemporalBundleDto>(`/api/incidents/temporal${qs ? `?${qs}` : ''}`);
+  },
+  incidentPriorities: (opts?: {
+    since?: string; until?: string;
+    burstWindowMs?: number; burstThreshold?: number;
+    agentWindowMs?: number; agentThreshold?: number;
+    topN?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts?.since)          params.set('since', opts.since);
+    if (opts?.until)          params.set('until', opts.until);
+    if (opts?.burstWindowMs != null)  params.set('burstWindowMs', String(opts.burstWindowMs));
+    if (opts?.burstThreshold != null) params.set('burstThreshold', String(opts.burstThreshold));
+    if (opts?.agentWindowMs != null)  params.set('agentWindowMs', String(opts.agentWindowMs));
+    if (opts?.agentThreshold != null) params.set('agentThreshold', String(opts.agentThreshold));
+    if (opts?.topN != null)           params.set('topN', String(opts.topN));
+    const qs = params.toString();
+    return http<IncidentPrioritySummaryDto>(`/api/incidents/priorities${qs ? `?${qs}` : ''}`);
   },
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

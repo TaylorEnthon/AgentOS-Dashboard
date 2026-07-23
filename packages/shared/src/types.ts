@@ -1310,3 +1310,121 @@ export interface IntelligenceSignalSummary {
   totalCount: number;
   computedAt: string;
 }
+
+/* ---------------- v1.11: Incident Intelligence Prioritization ---------------- */
+
+/**
+ * Priority level — the discrete bucket into which a priority score
+ * falls. Used by the UI to color-code the row (critical → red,
+ * high → amber, medium → blue, low → muted).
+ *
+ * Mapping (deterministic, rule-based):
+ *   - 'critical'  score >= 70
+ *   - 'high'      score >= 50
+ *   - 'medium'    score >= 30
+ *   - 'low'       score <  30
+ */
+export type PriorityLevel = 'critical' | 'high' | 'medium' | 'low';
+
+/**
+ * Evidence type — the category of signal that contributed to the
+ * priority score. Each type corresponds to one component of the
+ * score formula; the `message` is the human-readable explanation.
+ *
+ *   - 'severity'    incident severity distribution
+ *   - 'frequency'   burst / rapid incident count
+ *   - 'impact'      affected executions / agents
+ *   - 'trend'       direction (improving / stable / degrading / no-data)
+ *   - 'base'        baseline (no specific input; placeholder for low scores)
+ */
+export type PriorityEvidenceKind = 'severity' | 'frequency' | 'impact' | 'trend' | 'base';
+
+/**
+ * One evidence item. Each priority insight exposes 0+ evidence items
+ * that together explain the score. The chain is rendered in the UI
+ * as a "why this matters" bullet list.
+ */
+export interface PriorityEvidence {
+  kind: PriorityEvidenceKind;
+  /** Component score contribution in [0, maxComponentScore]. */
+  contribution: number;
+  /** Maximum possible score for this component. */
+  maxContribution: number;
+  /** Human-readable explanation. */
+  message: string;
+}
+
+/**
+ * One prioritized intelligence insight. Pure-derived; deterministic;
+ * no DB writes. Combines IntelligenceSignal + AgentReliabilityTrend +
+ * IncidentTemporalSummary into a single ranked item.
+ *
+ * The score is the sum of component contributions (severity, frequency,
+ * impact, trend). Level is derived from score via fixed thresholds.
+ * `reasons` is the evidence chain explaining the score.
+ */
+export interface IncidentPriorityInsight {
+  /** Stable id: `${signalKind}:${subjectKey}`. */
+  priorityId: string;
+  /** The signal kind that triggered this priority (one-to-one with IntelligenceSignal.kind). */
+  signalKind: IntelligenceSignalKind;
+  /** The signal severity tag. */
+  signalSeverity: IntelligenceSignalSeverity;
+  /** Subject identifier (kind or agentType, depending on signal). */
+  subjectKey: string;
+  /** Optional human-readable subject label. */
+  subjectLabel?: string;
+  /** The original signal this priority is built from (for traceability). */
+  signalId: string;
+  /** Original signal score (incident count, affected executions, etc). */
+  signalScore: number;
+  /** Original signal threshold. */
+  signalThreshold: number;
+  /** The original signal description (passthrough). */
+  signalDescription: string;
+  /** ISO timestamp of the window start. */
+  since: string;
+  /** ISO timestamp of the window end. */
+  until: string;
+  /**
+   * Composite priority score in [0, 100]. Sum of:
+   *   - severity   (max 40)
+   *   - frequency  (max 10)
+   *   - impact     (max 30)
+   *   - trend      (max 20)
+   *   - base       (max 0, never contributes; reserved for tie-breaking)
+   * Total max = 100.
+   */
+  priorityScore: number;
+  /** Priority level bucket derived from priorityScore. */
+  priorityLevel: PriorityLevel;
+  /** Evidence chain: ordered from highest to lowest contribution. */
+  reasons: PriorityEvidence[];
+  /**
+   * Optional trend hint for the same subject. `null` when the
+   * signal is not agent-keyed (e.g. burst-by-kind) or when the agent
+   * trend query did not match.
+   */
+  trendHint: TrendDirection | null;
+}
+
+/**
+ * Workspace-level priority summary returned by
+ * `/api/incidents/priorities`. Top-N entries sorted by priorityScore
+ * desc, then by signalSeverity desc, then by signalId asc.
+ */
+export interface IncidentPrioritySummary {
+  /** Top-N prioritized insights. */
+  priorities: IncidentPriorityInsight[];
+  /** Highest priorityLevel across all priorities. */
+  highestLevel: PriorityLevel | null;
+  /** Count of priorities at each level. */
+  byLevel: Record<PriorityLevel, number>;
+  /** Total priority count (not capped by topN). */
+  totalCount: number;
+  /** ISO window start used for the calculation. */
+  since: string;
+  /** ISO window end used for the calculation. */
+  until: string;
+  computedAt: string;
+}

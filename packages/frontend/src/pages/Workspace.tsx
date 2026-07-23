@@ -471,6 +471,7 @@ function IncidentSection() {
   const [data, setData] = useState<import('../lib/api').IncidentSummaryDto | null>(null);
   const [corr, setCorr] = useState<import('../lib/api').IncidentCorrelationSummaryDto | null>(null);
   const [temporal, setTemporal] = useState<import('../lib/api').IncidentTemporalBundleDto | null>(null);
+  const [priorities, setPriorities] = useState<import('../lib/api').IncidentPrioritySummaryDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
@@ -478,9 +479,10 @@ function IncidentSection() {
     const load = () => Promise.all([
       api.incidentSummary({ topAffectedLimit: 5, recentRecoveredLimit: 5 }),
       api.incidentCorrelations(),
-      api.incidentTemporal(),  // v1.10: 24h window + intelligence signals
+      api.incidentTemporal(),     // v1.10: 24h window + intelligence signals
+      api.incidentPriorities({ topN: 5 }),  // v1.11: prioritized insights
     ])
-      .then(([d, c, t]) => { if (!cancelled) { setData(d); setCorr(c); setTemporal(t); setErr(null); } })
+      .then(([d, c, t, p]) => { if (!cancelled) { setData(d); setCorr(c); setTemporal(t); setPriorities(p); setErr(null); } })
       .catch((e) => { if (!cancelled) setErr(String(e)); });
     load();
     const t = setInterval(load, 30_000);
@@ -494,8 +496,9 @@ function IncidentSection() {
         <CardDescription>
           Anomaly-driven health incidents tracked through detected → ongoing →
           recovered. v1.9 adds cross-incident correlation; v1.10 adds 24h
-          temporal view, intelligence signals (burst / agent-degradation / recovery
-          surge), and per-agent trend direction. Read-only.
+          temporal view + intelligence signals + per-agent trend; v1.11
+          adds prioritized insights with evidence chain ("Needs Attention
+          Now"). Read-only.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -546,6 +549,57 @@ function IncidentSection() {
                           ({c.activeCount} active)
                         </span>
                       )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* v1.11: "Needs Attention Now" — top-N prioritized insights */}
+            {priorities && priorities.priorities.length > 0 && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                  Needs Attention Now
+                </h4>
+                <ul className="space-y-2">
+                  {priorities.priorities.slice(0, 5).map((p) => (
+                    <li key={p.priorityId} className="rounded border border-border bg-background p-2 text-xs space-y-1">
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        <Badge
+                          tone={
+                            p.priorityLevel === 'critical' ? 'danger' :
+                            p.priorityLevel === 'high'     ? 'warning' :
+                            p.priorityLevel === 'medium'   ? 'info' :
+                                                            'muted'
+                          }
+                          className="text-[10px] uppercase shrink-0"
+                        >
+                          {p.priorityLevel}
+                        </Badge>
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{p.signalKind}</span>
+                        <code className="font-mono text-[11px] text-foreground/90 truncate flex-1" title={p.subjectLabel ?? p.subjectKey}>
+                          {p.subjectLabel ?? p.subjectKey}
+                        </code>
+                        <span className="tabular-nums text-[10px] text-muted-foreground shrink-0">score {p.priorityScore}</span>
+                        {p.trendHint && (
+                          <span className="text-[10px] text-rose-700 dark:text-rose-400 shrink-0">
+                            {p.trendHint}
+                          </span>
+                        )}
+                      </div>
+                      <details className="text-[10px] text-muted-foreground">
+                        <summary className="cursor-pointer hover:text-foreground">
+                          {p.reasons.length} reason{p.reasons.length === 1 ? '' : 's'}
+                        </summary>
+                        <ul className="mt-1 space-y-0.5 pl-3">
+                          {p.reasons.map((r, i) => (
+                            <li key={i} className="text-[10px]">
+                              <span className="uppercase tracking-wider text-foreground/70">[{r.kind}]</span>{' '}
+                              {r.message}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
                     </li>
                   ))}
                 </ul>
