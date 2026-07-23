@@ -266,6 +266,46 @@ CREATE TABLE IF NOT EXISTS execution_status_history (
 CREATE INDEX IF NOT EXISTS idx_execution_status_history_exec
   ON execution_status_history (execution_id, id);
 
+/*
+ * v1.5: persistent Health Snapshot History. Replaces the v1.4
+ * in-memory ring buffer so health trend / agent reliability survive
+ * process restarts. Append-only; retention cleanup lives in
+ * health-history-repository.ts.
+ */
+CREATE TABLE IF NOT EXISTS execution_health_history (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_id   TEXT NOT NULL,
+  score          INTEGER NOT NULL,
+  level          TEXT NOT NULL,        -- healthy / warning / critical
+  derived_status TEXT NOT NULL,
+  factors_json   TEXT NOT NULL,        -- JSON-encoded HealthFactor[]
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_health_history_exec
+  ON execution_health_history (execution_id, id);
+CREATE INDEX IF NOT EXISTS idx_execution_health_history_created
+  ON execution_health_history (created_at);
+
+/*
+ * v1.5: persistent Attention Lifecycle History. One row per state
+ * transition (detected / ongoing / recovered). Append-only; no
+ * retention (the set of transitions is naturally bounded by user
+ * activity).
+ */
+CREATE TABLE IF NOT EXISTS execution_attention_history (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  execution_id   TEXT NOT NULL,
+  attention_key  TEXT NOT NULL,
+  lifecycle_state TEXT NOT NULL,       -- detected / ongoing / recovered
+  severity       TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_attention_history_exec
+  ON execution_attention_history (execution_id, id);
+CREATE INDEX IF NOT EXISTS idx_execution_attention_history_key
+  ON execution_attention_history (execution_id, attention_key, id);
+
 CREATE TABLE IF NOT EXISTS ingestion_files (
   id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
@@ -298,7 +338,7 @@ CREATE INDEX IF NOT EXISTS idx_events_ts        ON activity_events(timestamp);
 CREATE INDEX IF NOT EXISTS idx_ingest_provider  ON ingestion_files(provider);
 `;
 
-const CURRENT_SCHEMA_VERSION = '0.2.0';
+const CURRENT_SCHEMA_VERSION = '1.5.0';
 
 export class Db {
   readonly raw: Database.Database;

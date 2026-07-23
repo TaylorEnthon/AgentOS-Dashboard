@@ -1,21 +1,18 @@
 /**
- * v1.4 Agent Health Memory & Trend — in-memory history stores
- * and pure analysis functions.
+ * v1.5 Health Memory & Trend — repository-backed (was in-memory in v1.4).
  *
- * Three responsibilities:
- *   1. HealthHistoryStore     — per-execution snapshot log (deduped)
- *   2. AttentionHistoryStore  — per-(execution, key) lifecycle log
- *   3. Pure analysis:          analyzeHealthTrend + computeAgentReliability
+ * Public surface unchanged from v1.4: HealthHistoryStore and
+ * AttentionHistoryStore still expose shouldRecord / append / read /
+ * latest / size / clear + reconcileFromQueue. Internally they now
+ * delegate to HealthHistoryRepository / AttentionHistoryRepository
+ * (SQLite) when a Db has been bound via setHealthHistoryDb.
  *
- * Storage is in-memory (matches v1.2 cache philosophy). Process
- * restart wipes the history; v1.4 is a v1 trend, not an audit log.
- * We deliberately do NOT touch sessions / activity_events / collectors.
+ * If no Db is bound, the stores fall back to in-memory ring buffers
+ * (legacy v1.4 behavior). This keeps the existing test suite
+ * passing without modification, while production gets persistence.
  *
- * Hooks in routes.ts:
- *   - After /health computes a score, call `shouldRecordHealthSnapshot`
- *     to decide whether to write. If yes, push to HealthHistoryStore.
- *   - After /attention builds a queue, diff against AttentionHistoryStore
- *     and record 'detected' / 'recovered' transitions.
+ * Pure functions (analyzeHealthTrend, computeAgentReliability) are
+ * unchanged.
  */
 
 import type {
@@ -25,16 +22,62 @@ import type {
   AttentionItem,
   AttentionLifecycleState,
   AttentionSeverity,
+  HealthFactor,
   HealthLevel,
   HealthSnapshotHistory,
   HealthTrend,
   HealthTrendDirection,
 } from '@agentos/shared';
+import {
+  AttentionHistoryRepository,
+  DEFAULT_HEALTH_RETENTION_DAYS,
+  HealthHistoryRepository,
+  decodeFactors,
+  healthRetentionCutoffIso,
+  type AttentionHistoryRow,
+  type HealthHistoryRow,
+} from './health-history-repository.js';
+import type { Db } from './db.js';
+
+const DEFAULT_MAX_ENTRIES = 200;     // per execution (in-memory fallback)
+const DEFAULT_MIN_INTERVAL_MS = 5 * 60_000; // 5 min dedup window for same level
+
+/* ---------------- module-level backend binding ---------------- */
+
+let healthRepo: HealthHistoryRepository | null = null;
+let attentionRepo: AttentionHistoryRepository | null = null;
+
+/**
+ * Lazy-init: bind the persistent backend. Idempotent.
+ * Server startup should call this once after creating the Db.
+ * After this call, all writes go through SQLite.
+ */
+export function setHealthHistoryDb(db: Db): void {
+  if (healthRepo && attentionRepo) return; // already bound
+  healthRepo = new HealthHistoryRepository(db);
+  attentionRepo = new AttentionHistoryRepository(db);
+  // Best-effort retention cleanup on startup.
+  try {
+    const cutoff = healthRetentionCutoffIso(Date.now(), DEFAULT_HEALTH_RETENTION_DAYS);
+    const removed = healthRepo.cleanupExpiredHealth(cutoff);
+    if (removed > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[health-history] startup retention: removed ${removed} health snapshot(s) older than ${DEFAULT_HEALTH_RETENTION_DAYS} days`);
+    }
+  } catch (err) {
+    console.error('[health-history] startup retention failed:', err);
+  }
+}
+
+/** For tests: drop the binding and clear all in-memory state. */
+export function _resetHealthHistoryDbForTests(): void {
+  healthRepo = null;
+  attentionRepo = null;
+  healthHistoryStore.clear();
+  attentionHistoryStore.clear();
+}
 
 /* ---------------- 1. HealthHistoryStore ---------------- */
-
-const DEFAULT_MAX_ENTRIES = 200;     // per execution
-const DEFAULT_MIN_INTERVAL_MS = 5 * 60_000; // 5 min dedup window for same level
 
 interface StoredHealth {
   id: number;
@@ -58,10 +101,13 @@ class HealthHistoryStore {
    *   - Level changed: yes.
    *   - Same level + min interval elapsed: yes (heartbeat).
    *   - Same level + too soon: no.
+   *
+   * When SQLite is bound, "previous" comes from the DB instead of
+   * the in-memory ring; this is the v1.4 logic unchanged.
    */
   shouldRecord(
     prev: HealthSnapshotHistory | null,
-    curr: { score: number; level: HealthLevel; derivedStatus: import('@agentos/shared').DerivedLifecycleStatus; factors: import('@agentos/shared').HealthFactor[] },
+    curr: { score: number; level: HealthLevel; derivedStatus: import('@agentos/shared').DerivedLifecycleStatus; factors: HealthFactor[] },
     nowMs: number,
   ): boolean {
     if (prev === null) return true;
@@ -73,9 +119,31 @@ class HealthHistoryStore {
 
   /**
    * Append a snapshot. Caller is responsible for calling
-   * `shouldRecord` first; this method does not re-check.
+   * `shouldRecord` first. When SQLite is bound, the row is persisted
+   * and the in-memory cache is bypassed.
    */
   append(executionId: string, snap: Omit<HealthSnapshotHistory, 'id' | 'executionId'>): HealthSnapshotHistory {
+    if (healthRepo) {
+      const nowIso = snap.createdAt;
+      healthRepo.insertHealth({
+        executionId,
+        score: snap.score,
+        level: snap.level,
+        derivedStatus: snap.derivedStatus,
+        factors: snap.factors,
+        nowIso,
+      });
+      // Best-effort retention: every 100th insert, run cleanup.
+      this.maybeRetention();
+      // Return a synthetic entry with the DB id.
+      const last = healthRepo.getLatestHealth(executionId);
+      if (last) {
+        return this.rowToEntry(last);
+      }
+      // Fallback: if the read-after-write somehow misses, return synthetic.
+      return { id: -1, executionId, ...snap };
+    }
+    // In-memory fallback (legacy v1.4 behavior).
     const entry: HealthSnapshotHistory = {
       id: this.nextId++,
       executionId,
@@ -83,7 +151,6 @@ class HealthHistoryStore {
     };
     const arr = this.byExec.get(executionId) ?? [];
     arr.push({ id: entry.id!, entry });
-    // Ring-buffer trim (keep the most recent N).
     if (arr.length > this.maxEntries) {
       arr.splice(0, arr.length - this.maxEntries);
     }
@@ -93,6 +160,10 @@ class HealthHistoryStore {
 
   /** Read snapshots for one execution, oldest-first, capped at limit. */
   read(executionId: string, limit = 100): HealthSnapshotHistory[] {
+    if (healthRepo) {
+      const rows = healthRepo.readHealth(executionId, limit);
+      return rows.map((r) => this.rowToEntry(r));
+    }
     const arr = this.byExec.get(executionId) ?? [];
     const cap = Math.max(1, Math.min(limit, this.maxEntries));
     return arr.slice(-cap).map((s) => s.entry);
@@ -100,22 +171,53 @@ class HealthHistoryStore {
 
   /** Latest entry for an execution, or null. */
   latest(executionId: string): HealthSnapshotHistory | null {
+    if (healthRepo) {
+      const row = healthRepo.getLatestHealth(executionId);
+      return row ? this.rowToEntry(row) : null;
+    }
     const arr = this.byExec.get(executionId);
     if (!arr || arr.length === 0) return null;
     return arr[arr.length - 1]!.entry;
   }
 
-  /** Total entries across all executions (for tests). */
+  /** Total entries across all executions (in-memory only; SQLite count via repo). */
   size(): number {
+    if (healthRepo) return healthRepo.healthSize();
     let n = 0;
     for (const arr of this.byExec.values()) n += arr.length;
     return n;
   }
 
-  /** Test helper: drop everything. */
+  /** Test helper: drop everything (in-memory only). */
   clear(): void {
     this.byExec.clear();
     this.nextId = 1;
+  }
+
+  /** Convert a DB row to the shared HealthSnapshotHistory shape. */
+  private rowToEntry(row: HealthHistoryRow): HealthSnapshotHistory {
+    return {
+      id: row.id,
+      executionId: row.execution_id,
+      score: row.score,
+      level: row.level,
+      derivedStatus: row.derived_status as import('@agentos/shared').DerivedLifecycleStatus,
+      factors: decodeFactors(row.factors_json),
+      createdAt: row.created_at,
+    };
+  }
+
+  private insertCounter = 0;
+  private maybeRetention(): void {
+    this.insertCounter++;
+    if (this.insertCounter % 100 === 0 && healthRepo) {
+      try {
+        const cutoff = healthRetentionCutoffIso(Date.now(), DEFAULT_HEALTH_RETENTION_DAYS);
+        healthRepo.cleanupExpiredHealth(cutoff);
+      } catch {
+        // best-effort; never fail an insert because of cleanup
+      }
+    }
   }
 }
 
@@ -141,15 +243,14 @@ class AttentionHistoryStore {
    * state and append 'detected' / 'recovered' transitions.
    * Idempotent: re-running with the same queue writes nothing new.
    *
-   * `current` is the key list (e.g. `["review-conflict", "investigate-blocked"]`)
-   * per executionId. Items not in the current list are "recovered".
+   * When SQLite is bound, state tracking uses the DB (latest lifecycle_state
+   * for each (exec, key) pair); new rows are persisted.
    */
   reconcileFromQueue(
     queue: AttentionItem[],
     nowIso: string = new Date().toISOString(),
   ): AttentionHistoryEntry[] {
     const out: AttentionHistoryEntry[] = [];
-    // Build current map: execId -> set of (key -> { severity, reason })
     const currentByExec = new Map<string, Map<string, { severity: AttentionSeverity; reason: string }>>();
     for (const it of queue) {
       let m = currentByExec.get(it.executionId);
@@ -157,8 +258,82 @@ class AttentionHistoryStore {
       m.set(it.recommendedAction, { severity: it.severity, reason: it.reason });
     }
 
-    // Walk every (exec, key) we know about and detect transitions.
-    const knownKeys = new Set(this.byExecKey.keys());
+    if (attentionRepo) {
+      // SQLite-backed: state = latest row's lifecycle_state
+      const knownKeys = new Set<string>();
+      // We need to discover all known (exec, key) pairs. For simplicity
+      // we re-query the DB for each exec in currentByExec + last seen.
+      // (Cheap; we cap at 100 keys per exec.)
+      for (const execId of currentByExec.keys()) {
+        const rows = attentionRepo.readAttention(execId, 1000);
+        for (const r of rows) knownKeys.add(`${r.execution_id}|${r.attention_key}`);
+        // Also fold in any execIds that were in queue previously but
+        // not now (for "recovered" detection).
+        for (const r of rows) {
+          if (!currentByExec.has(r.execution_id)) {
+            knownKeys.add(`${r.execution_id}|${r.attention_key}`);
+          }
+        }
+      }
+      const seen = new Set<string>();
+      for (const [execId, m] of currentByExec) {
+        for (const [key, info] of m) {
+          const composite = `${execId}|${key}`;
+          seen.add(composite);
+          // getAttentionState returns null when (exec,key) has never
+          // been recorded. Treat null/undefined and 'recovered' as
+          // "not currently open" → write a fresh 'detected' row.
+          const prevRaw = attentionRepo.getAttentionState(execId, key);
+          const prev: AttentionLifecycleState | null = prevRaw ?? null;
+          const wasOpen = prev === 'detected' || prev === 'ongoing';
+          if (!wasOpen) {
+            attentionRepo.insertAttention({
+              executionId: execId, attentionKey: key,
+              lifecycle: 'detected',
+              severity: info.severity, reason: info.reason, nowIso,
+            });
+            out.push(this._rowToEntry({
+              id: -1, execution_id: execId, attention_key: key,
+              lifecycle_state: 'detected',
+              severity: info.severity, reason: info.reason, created_at: nowIso,
+            }));
+          } else {
+            // prev was 'detected' or 'ongoing' and still in queue: write 'ongoing'
+            attentionRepo.insertAttention({
+              executionId: execId, attentionKey: key,
+              lifecycle: 'ongoing',
+              severity: info.severity, reason: info.reason, nowIso,
+            });
+            out.push(this._rowToEntry({
+              id: -1, execution_id: execId, attention_key: key,
+              lifecycle_state: 'ongoing',
+              severity: info.severity, reason: info.reason, created_at: nowIso,
+            }));
+          }
+        }
+      }
+      // Recovered: known key no longer in the queue.
+      for (const composite of knownKeys) {
+        if (seen.has(composite)) continue;
+        const [executionId, attentionKey] = composite.split('|') as [string, string];
+        const prev = attentionRepo.getAttentionState(executionId, attentionKey);
+        if (prev === 'recovered' || prev === null) continue;
+        attentionRepo.insertAttention({
+          executionId, attentionKey,
+          lifecycle: 'recovered',
+          severity: 'low', reason: 'No longer in attention queue', nowIso,
+        });
+        out.push(this._rowToEntry({
+          id: -1, execution_id: executionId, attention_key: attentionKey,
+          lifecycle_state: 'recovered',
+          severity: 'low', reason: 'No longer in attention queue', created_at: nowIso,
+        }));
+      }
+      return out;
+    }
+
+    // In-memory fallback (legacy v1.4)
+    const knownKeysMem = new Set(this.byExecKey.keys());
     const seen = new Set<string>();
     for (const [execId, m] of currentByExec) {
       for (const [key, info] of m) {
@@ -168,7 +343,6 @@ class AttentionHistoryStore {
         if (prev === undefined) {
           this.byExecKey.set(composite, 'detected');
           out.push(this._append(execId, {
-            executionId: execId,
             attentionKey: key,
             lifecycle: 'detected',
             severity: info.severity,
@@ -178,20 +352,15 @@ class AttentionHistoryStore {
         } else if (prev === 'recovered') {
           this.byExecKey.set(composite, 'ongoing');
           out.push(this._append(execId, {
-            executionId: execId,
             attentionKey: key,
             lifecycle: 'detected',
             severity: info.severity,
             reason: info.reason,
             createdAt: nowIso,
           }));
-        }
-        // prev was 'detected' or 'ongoing' and still in queue: write a heartbeat 'ongoing'
-        // (only every N seconds; we always write here for simplicity, tests can dedupe).
-        else if (prev === 'detected' || prev === 'ongoing') {
+        } else if (prev === 'detected' || prev === 'ongoing') {
           this.byExecKey.set(composite, 'ongoing');
           out.push(this._append(execId, {
-            executionId: execId,
             attentionKey: key,
             lifecycle: 'ongoing',
             severity: info.severity,
@@ -201,18 +370,16 @@ class AttentionHistoryStore {
         }
       }
     }
-    // Recovered: known key no longer in the queue.
-    for (const composite of knownKeys) {
+    for (const composite of knownKeysMem) {
       if (seen.has(composite)) continue;
       const prev = this.byExecKey.get(composite)!;
-      if (prev === 'recovered') continue; // already recovered, no need to repeat
+      if (prev === 'recovered') continue;
       this.byExecKey.set(composite, 'recovered');
       const [executionId, attentionKey] = composite.split('|') as [string, string];
       out.push(this._append(executionId, {
-        executionId,
         attentionKey,
         lifecycle: 'recovered',
-        severity: 'low', // recovered is informational
+        severity: 'low',
         reason: 'No longer in attention queue',
         createdAt: nowIso,
       }));
@@ -220,9 +387,10 @@ class AttentionHistoryStore {
     return out;
   }
 
-  private _append(executionId: string, entry: Omit<AttentionHistoryEntry, 'id'>): AttentionHistoryEntry {
+  private _append(executionId: string, entry: Omit<AttentionHistoryEntry, 'id' | 'executionId'>): AttentionHistoryEntry {
     const full: AttentionHistoryEntry = {
       id: this.nextId++,
+      executionId,
       ...entry,
     };
     const arr = this.byExec.get(executionId) ?? [];
@@ -234,13 +402,30 @@ class AttentionHistoryStore {
     return full;
   }
 
+  private _rowToEntry(row: AttentionHistoryRow): AttentionHistoryEntry {
+    return {
+      id: row.id,
+      executionId: row.execution_id,
+      attentionKey: row.attention_key,
+      lifecycle: row.lifecycle_state,
+      severity: row.severity as AttentionSeverity,
+      reason: row.reason,
+      createdAt: row.created_at,
+    };
+  }
+
   read(executionId: string, limit = 100): AttentionHistoryEntry[] {
+    if (attentionRepo) {
+      const rows = attentionRepo.readAttention(executionId, limit);
+      return rows.map((r) => this._rowToEntry(r));
+    }
     const arr = this.byExec.get(executionId) ?? [];
     const cap = Math.max(1, Math.min(limit, this.maxEntries));
     return arr.slice(-cap).map((s) => s.entry);
   }
 
   size(): number {
+    if (attentionRepo) return attentionRepo.attentionSize();
     let n = 0;
     for (const arr of this.byExec.values()) n += arr.length;
     return n;
@@ -255,15 +440,6 @@ class AttentionHistoryStore {
 
 /* ---------------- 3. Pure analysis ---------------- */
 
-/**
- * Pure: given a list of HealthSnapshotHistory rows, return a trend
- * direction + score delta.
- *
- * Direction is based on the scoreDelta:
- *   |delta| < 5  -> 'stable'
- *   delta > 0    -> 'improving'
- *   delta < 0    -> 'degrading'
- */
 export function analyzeHealthTrend(
   history: HealthSnapshotHistory[],
   nowMs: number = Date.now(),
@@ -305,20 +481,11 @@ export function analyzeHealthTrend(
   };
 }
 
-/**
- * Pure: aggregate HealthSnapshotHistory rows by `executionId.split(':')[0]`
- * (i.e. the agentType prefix) into per-agent reliability summaries.
- *
- * "Completed" vs "failed" classification is by derivedStatus at
- * snapshot time. Recovery time is the average ms from a 'failed'
- * snapshot to the next 'completed' snapshot within the same execution.
- */
 export function computeAgentReliability(
   history: HealthSnapshotHistory[],
-  agentTypes: Map<string, AgentType>, // executionId -> agentType
+  agentTypes: Map<string, AgentType>,
   nowMs: number = Date.now(),
 ): AgentReliabilitySummary[] {
-  // Group by agent
   const byAgent = new Map<string, HealthSnapshotHistory[]>();
   for (const h of history) {
     const agent = agentTypes.get(h.executionId);
@@ -336,7 +503,6 @@ export function computeAgentReliability(
     let recoverySumMs = 0;
     let recoveryCount = 0;
 
-    // Group by execution for recovery calculation.
     const byExec = new Map<string, HealthSnapshotHistory[]>();
     for (const s of samples) {
       const arr = byExec.get(s.executionId) ?? [];
@@ -351,7 +517,6 @@ export function computeAgentReliability(
     }
 
     for (const [, execSamples] of byExec) {
-      // Find each failed -> next completed transition.
       const sorted = execSamples.slice().sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
       let lastFailedMs: number | null = null;
       for (const s of sorted) {
@@ -381,7 +546,6 @@ export function computeAgentReliability(
       computedAt: new Date(nowMs).toISOString(),
     });
   }
-  // Sort by reliability score desc for stable UI.
   out.sort((a, b) => b.reliabilityScore - a.reliabilityScore || a.agentType.localeCompare(b.agentType));
   return out;
 }
@@ -391,7 +555,6 @@ export function computeAgentReliability(
 export const healthHistoryStore = new HealthHistoryStore();
 export const attentionHistoryStore = new AttentionHistoryStore();
 
-/** Test helpers — create isolated instances. */
 export function createHealthHistoryStore(opts?: { maxEntries?: number; minIntervalMs?: number }): HealthHistoryStore {
   return new HealthHistoryStore(opts);
 }

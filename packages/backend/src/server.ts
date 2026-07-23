@@ -9,6 +9,7 @@ import { SettingsStore } from './settings.js';
 import { Scheduler } from './scheduler.js';
 import { registerRoutes } from './routes.js';
 import { seedAgents } from './seed.js';
+import { setHealthHistoryDb } from './health-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -34,6 +35,11 @@ async function main(): Promise<void> {
   const db = new Db(DB_FILE);
   const settings = new SettingsStore(db, SETTINGS_FILE);
   const scheduler = new Scheduler(db, settings);
+
+  // Bind SQLite persistence for health snapshot history + attention
+  // lifecycle history (v1.5). Without this call the stores fall back
+  // to in-memory ring buffers (v1.4 behavior).
+  setHealthHistoryDb(db);
 
   await seedAgents(db);
 

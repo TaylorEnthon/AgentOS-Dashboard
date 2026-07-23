@@ -85,9 +85,11 @@ test('usage and event insert are idempotent via primary key', () => {
 test('overview aggregates correctly', () => {
   setup();
   try {
-    db.upsertSession(makeSession('s1', '2026-07-22T10:00:00Z', 'completed', 100, 50, 0.5));
-    db.upsertSession(makeSession('s2', '2026-07-22T11:00:00Z', 'running',   200, 80, 0.7));
-    db.upsertSession(makeSession('s3', '2026-07-21T10:00:00Z', 'completed', 50,  10, 0.1));
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 24 * 60 * 60_000).toISOString().slice(0, 10);
+    db.upsertSession(makeSession('s1', `${today}T10:00:00Z`, 'completed', 100, 50, 0.5));
+    db.upsertSession(makeSession('s2', `${today}T11:00:00Z`, 'running',   200, 80, 0.7));
+    db.upsertSession(makeSession('s3', `${yesterday}T10:00:00Z`, 'completed', 50,  10, 0.1));
     const ov = db.overview();
     assert.equal(ov.totalSessions, 3);
     assert.equal(ov.activeSessions, 1);
