@@ -1719,3 +1719,33 @@ export interface IncidentRecommendedActionBundle {
   /** ISO timestamp at which the bundle was assembled. */
   generatedAt: string;
 }
+
+/* ---------------- v1.17: Incident Investigation Narrative ---------------- */
+
+/**
+ * Human-readable investigation narrative for a single HealthIncident.
+ *
+ * Generated deterministically from the IncidentInvestigationReport (v1.15):
+ *   - `summary`     — 1-2 sentences describing WHAT this incident is
+ *   - `findings`    — observed facts (history / evidence / actions passthrough)
+ *   - `hypotheses`  — "possible explanations" — explicitly NOT root cause
+ *                      (always ends with a caveat reminding the reader)
+ *
+ * NOT LLM, NOT ML, NOT auto-diagnosis, NOT auto-fix. Pure template
+ * composition over the v1.15 report fields.
+ *
+ * Pure / read-only / deterministic. Returned by
+ * `GET /api/incidents/:incidentKey/narrative`.
+ */
+export interface IncidentInvestigationNarrative {
+  /** The incidentKey this narrative is for (echo). */
+  incidentKey: string;
+  /** 1-2 sentence overview of the incident (kind, severity, scope). */
+  summary: string;
+  /** Ordered observed facts derived from the report. */
+  findings: string[];
+  /** Ordered "possible explanations" — explicit caveat that these are NOT root causes. */
+  hypotheses: string[];
+  /** ISO timestamp at which the narrative was assembled. */
+  generatedAt: string;
+}

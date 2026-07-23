@@ -703,6 +703,16 @@ export interface IncidentRecommendedActionBundleDto {
   generatedAt: string;
 }
 
+/* v1.17: Incident Investigation Narrative */
+
+export interface IncidentInvestigationNarrativeDto {
+  incidentKey: string;
+  summary: string;
+  findings: string[];
+  hypotheses: string[];
+  generatedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1161,6 +1171,10 @@ export const api = {
   incidentActions: (incidentKey: string) =>
     http<IncidentRecommendedActionBundleDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/actions`,
+    ),
+  incidentNarrative: (incidentKey: string) =>
+    http<IncidentInvestigationNarrativeDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/narrative`,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

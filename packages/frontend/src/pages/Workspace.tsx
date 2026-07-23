@@ -1224,6 +1224,8 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
   const [report, setReport] = useState<import('../lib/api').IncidentInvestigationReportDto | null>(null);
   const [actions, setActions] = useState<import('../lib/api').IncidentRecommendedActionBundleDto | null>(null);
   const [actionsErr, setActionsErr] = useState<string | null>(null);
+  const [narrative, setNarrative] = useState<import('../lib/api').IncidentInvestigationNarrativeDto | null>(null);
+  const [narrativeErr, setNarrativeErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1236,6 +1238,10 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
     api.incidentActions(incidentKey)
       .then((d) => { if (!cancelled) setActions(d); })
       .catch((e) => { if (!cancelled) setActionsErr(String(e)); });
+    // v1.17: lazily fetch narrative (independent of report / actions).
+    api.incidentNarrative(incidentKey)
+      .then((d) => { if (!cancelled) setNarrative(d); })
+      .catch((e) => { if (!cancelled) setNarrativeErr(String(e)); });
     return () => { cancelled = true; };
   }, [incidentKey]);
 
@@ -1312,6 +1318,44 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
       )}
       {actions && !actions.hasActions && (
         <p className="text-[10px] text-muted-foreground mt-1">no suggested actions for this incident.</p>
+      )}
+      {/* v1.17: Investigation narrative — 3-section text (summary / findings / hypotheses). */}
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Investigation narrative
+      </h6>
+      {narrativeErr && (
+        <p className="text-[10px] text-rose-600 mt-1">narrative: {narrativeErr}</p>
+      )}
+      {!narrative && !narrativeErr && (
+        <p className="text-[10px] text-muted-foreground mt-1">loading narrative…</p>
+      )}
+      {narrative && (
+        <div className="mt-1 space-y-1.5 text-[10px]">
+          <div>
+            <span className="uppercase tracking-wider text-muted-foreground">Summary. </span>
+            <span className="text-foreground/90">{narrative.summary}</span>
+          </div>
+          {narrative.findings.length > 0 && (
+            <div>
+              <p className="uppercase tracking-wider text-muted-foreground">Findings</p>
+              <ul className="mt-0.5 list-disc pl-4 space-y-0.5 text-foreground/90">
+                {narrative.findings.map((f, i) => (
+                  <li key={`f-${i}`}>{f}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {narrative.hypotheses.length > 0 && (
+            <div>
+              <p className="uppercase tracking-wider text-muted-foreground">Possible explanations</p>
+              <ul className="mt-0.5 list-disc pl-4 space-y-0.5 text-foreground/90">
+                {narrative.hypotheses.map((h, i) => (
+                  <li key={`h-${i}`}>{h}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

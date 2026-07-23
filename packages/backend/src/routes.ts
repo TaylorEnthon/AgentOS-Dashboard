@@ -55,6 +55,7 @@ import { buildHistoricalContext, parseIncidentKey } from './incident-history.js'
 import { buildRootCauseEvidence } from './incident-evidence.js';
 import { buildInvestigationReport } from './incident-report.js';
 import { buildRecommendedActions } from './incident-actions.js';
+import { buildInvestigationNarrative } from './incident-narrative.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1567,6 +1568,29 @@ export function registerRoutes(
         return reply.code(404).send({ error: 'failed to assemble actions' });
       }
       return bundle;
+    },
+  );
+
+  // v1.17: Human-readable investigation narrative for a single incident.
+  // Pure template composition over the IncidentInvestigationReport (v1.15).
+  // NOT LLM, NOT ML — deterministic text generation. Read-only; no DB writes.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey/narrative',
+    async (req, reply) => {
+      const incidentKey = decodeURIComponent(req.params.incidentKey);
+      if (!parseIncidentKey(incidentKey)) {
+        return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
+      }
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
+      const report = await buildReportForIncident(incidentKey, now);
+      if (!report) return reply.code(404).send({ error: 'incident not found or no matching priority' });
+      const narrative = buildInvestigationNarrative({ report, nowIso });
+      if (!narrative) {
+        // Defensive — should not happen since report is non-null.
+        return reply.code(404).send({ error: 'failed to assemble narrative' });
+      }
+      return narrative;
     },
   );
 
