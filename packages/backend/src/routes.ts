@@ -35,6 +35,14 @@ import {
 } from './health-history.js';
 import { detectHealthAnomalies } from './health-anomaly.js';
 import { extractKind, rowsToIncident, rowsToIncidentDetail, summarizeIncidents } from './incident-summary.js';
+import {
+  aggregateByAgent,
+  aggregateByExecution,
+  aggregateByKind,
+  buildCorrelationSummary,
+  buildCorrelations,
+  buildExecutionToAgentMap,
+} from './incident-correlation.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -865,15 +873,30 @@ export function registerRoutes(
     // v1.8: forward incident realtime events (incident_detected /
     // incident_escalated / incident_recovered) to the EventBus so
     // SSE subscribers see lifecycle transitions live.
+    // v1.9: also emit a `incident_correlation_refresh` event after
+    // every anomaly transition so cross-incident views can re-pull.
+    let lastTransitionReason: 'incident_detected' | 'incident_escalated' | 'incident_recovered' | null = null;
     for (const inp of inputs) {
       const history = healthHistoryStore.read(inp.executionId, 200);
       if (history.length >= 2) {
         attentionHistoryStore.reconcileAnomalies(history, undefined, {
           emit: (ev) => {
             eventBus.emit({ ...ev, ts: new Date().toISOString() });
+            if (ev.type === 'incident_detected' ||
+                ev.type === 'incident_escalated' ||
+                ev.type === 'incident_recovered') {
+              lastTransitionReason = ev.type;
+            }
           },
         });
       }
+    }
+    if (lastTransitionReason !== null) {
+      eventBus.emit({
+        type: 'incident_correlation_refresh',
+        ts: new Date().toISOString(),
+        reason: lastTransitionReason,
+      });
     }
 
     // v1.4: reconcile against in-memory history to record
@@ -1126,6 +1149,48 @@ export function registerRoutes(
         return reply.code(404).send({ error: 'incident not found' });
       }
       return detail;
+    },
+  );
+
+  // v1.9: Cross-incident correlation snapshot. Pure aggregation across
+  // every anomaly-derived incident in the system. No DB writes.
+  app.get<{ Querystring: { minIncidents?: string } }>(
+    '/api/incidents/correlations',
+    async (req) => {
+      const minIncidents = req.query.minIncidents
+        ? Math.max(1, Number(req.query.minIncidents))
+        : 1;
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      const correlations = buildCorrelations(incidents, execToAgent)
+        .filter((c) => c.incidentCount >= minIncidents);
+      const summary = buildCorrelationSummary(correlations, incidents, execToAgent);
+      return summary;
+    },
+  );
+
+  // v1.9: per-agent incident insight. Reads sessions + builds
+  // agentId → agentType map, then aggregates incidents by agent.
+  app.get<{ Params: { agentType: string } }>(
+    '/api/agents/:agentType/incidents',
+    async (req, reply) => {
+      const agentType = decodeURIComponent(req.params.agentType);
+      const valid: ReadonlyArray<string> = ['claude-code', 'codex', 'grok', 'gemini', 'hermes', 'custom'];
+      if (!valid.includes(agentType)) {
+        return reply.code(400).send({ error: 'invalid agentType', allowed: valid });
+      }
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      const filtered = incidents.filter((inc) => execToAgent.get(inc.executionId) === agentType);
+      const agentInsights = aggregateByAgent(filtered, execToAgent);
+      const kindInsights = aggregateByKind(filtered);
+      const executionInsights = aggregateByExecution(filtered);
+      return {
+        agentType,
+        aggregate: agentInsights[0] ?? null,
+        byKind: kindInsights,
+        byExecution: executionInsights,
+        incidents: filtered,
+        computedAt: new Date().toISOString(),
+      };
     },
   );
 
@@ -1494,3 +1559,65 @@ export type { RealtimeEvent, AgentStatusRow };
 
 // Re-export for type completeness
 export type { ConfidenceLevel };
+
+/* ---------------- v1.9 internal helper: gather every incident + exec→agent map ---------------- */
+
+/**
+ * Walk every known session, group its events into executions, build
+ * the exec→agent map from session.agent_id, and read each execution's
+ * full anomaly-derived attention history. Return flat HealthIncident[]
+ * + execId → AgentType map for downstream correlation.
+ *
+ * Read-only: zero DB writes. Pure-ish (depends on db state but
+ * produces a deterministic snapshot).
+ */
+export async function collectAllIncidents(db: Db): Promise<{
+  incidents: import('@agentos/shared').HealthIncident[];
+  execToAgent: Map<string, string>;
+}> {
+  const allSessions = db.listSessions({ limit: 1000 });
+  // Build sessionId → AgentType first.
+  const sessionToAgent = buildExecutionToAgentMap(
+    allSessions.map((s) => ({ id: s.id, agent_id: s.agent_id })),
+  );
+  // Then expand sessionId → every executionId derived from sessionId's
+  // events. Each session becomes one or more executions (1 per event group).
+  const execToAgent = new Map<string, string>();
+  for (const s of allSessions) {
+    const agentType = sessionToAgent.get(s.id);
+    if (!agentType) continue;
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const groups = groupEventsIntoExecutions(events);
+    for (let i = 0; i < groups.length; i++) {
+      execToAgent.set(`${s.id}:exec-${i}`, agentType);
+    }
+  }
+  const allRows: import('@agentos/shared').AttentionHistoryEntry[] = [];
+  for (const s of allSessions) {
+    const events = db.listEventsForSession(s.id, 5000).map(rowToTimelineItem);
+    const groups = groupEventsIntoExecutions(events);
+    for (let i = 0; i < groups.length; i++) {
+      const execId = `${s.id}:exec-${i}`;
+      allRows.push(...attentionHistoryStore.read(execId, 1000));
+    }
+  }
+  // Group rows by (exec, kind) → run rowsToIncident per group
+  const grouped = new Map<string, import('@agentos/shared').AttentionHistoryEntry[]>();
+  for (const r of allRows) {
+    if (r.attentionKey !== 'investigate-anomaly' &&
+        !r.attentionKey.startsWith('investigate-anomaly-')) continue;
+    const kind =
+      r.attentionKey === 'investigate-anomaly' ? 'umbrella' :
+      r.attentionKey.replace(/^investigate-anomaly-/, '');
+    const key = `${r.executionId}|${kind}`;
+    const arr = grouped.get(key);
+    if (arr) arr.push(r);
+    else grouped.set(key, [r]);
+  }
+  const incidents: import('@agentos/shared').HealthIncident[] = [];
+  for (const g of grouped.values()) {
+    const inc = rowsToIncident(g);
+    if (inc) incidents.push(inc);
+  }
+  return { incidents, execToAgent };
+}

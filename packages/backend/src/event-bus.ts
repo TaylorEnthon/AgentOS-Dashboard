@@ -89,6 +89,16 @@ export type RealtimeEvent =
       executionId: string;
       kind: import('@agentos/shared').HealthAnomalyKind;
       durationMs: number | null;
+    }
+  | {
+      // v1.9: emitted when the cross-incident correlation snapshot may
+      // have changed (i.e. a new incident transition just happened).
+      // Read-only notification: clients should refetch
+      // /api/incidents/correlations to refresh the workspace view.
+      // Does NOT mutate incident lifecycle.
+      type: 'incident_correlation_refresh';
+      ts: string;
+      reason: 'incident_detected' | 'incident_escalated' | 'incident_recovered';
     };
 
 export type RealtimeEventListener = (ev: RealtimeEvent) => void;

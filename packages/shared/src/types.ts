@@ -1007,3 +1007,134 @@ export interface IncidentSummary {
   /** When this summary was computed. */
   computedAt: string;
 }
+
+/* ---------------- v1.9: Incident Correlation & Intelligence ---------------- */
+
+/**
+ * Per-execution incident aggregation. One row per executionId that
+ * has ≥1 anomaly-derived incident.
+ *
+ * Pure-derived from `HealthIncident[]`. No DB writes.
+ */
+export interface ExecutionIncidentInsight {
+  executionId: string;
+  /** All incident kinds affecting this execution. */
+  kinds: HealthAnomalyKind[];
+  /** All unique incidents for this execution (deduped by incidentKey). */
+  incidents: number;
+  /** Active incidents (lifecycle !== 'recovered'). */
+  active: number;
+  /** Recovered incidents. */
+  recovered: number;
+  /** Worst severity observed (critical > high). */
+  worstSeverity: HealthAnomalySeverity;
+  /** Sum of escalationCount across all incidents in this execution. */
+  totalEscalations: number;
+  /** Most recent transition timestamp (any incident). */
+  lastTransitionAt: string | null;
+}
+
+/**
+ * Per-agent incident aggregation. Cross-execution view: one row per
+ * AgentType with rolled-up counts across all executions owned by that
+ * agent.
+ *
+ * Pure-derived from `HealthIncident[]` + an executionId → agentType
+ * map (caller supplies it; we never infer agent type from
+ * executionId directly).
+ */
+export interface AgentIncidentInsight {
+  agentType: string;
+  /** All execution IDs owned by this agent that have ≥1 incident. */
+  affectedExecutions: number;
+  /** Total incidents for this agent. */
+  incidentCount: number;
+  /** Active incidents (lifecycle !== 'recovered'). */
+  active: number;
+  /** Recovered incidents. */
+  recovered: number;
+  /** Critical-severity incidents (active + recovered). */
+  criticalCount: number;
+  /** High-severity incidents (active + recovered). */
+  highCount: number;
+  /** Total severity escalations across all executions of this agent. */
+  totalEscalations: number;
+  /** Worst severity observed. */
+  worstSeverity: HealthAnomalySeverity;
+  /** ISO timestamp of the most recent transition for this agent. */
+  lastTransitionAt: string | null;
+}
+
+/**
+ * Per-kind incident aggregation. Cross-execution + cross-agent view.
+ */
+export interface KindIncidentInsight {
+  kind: HealthAnomalyKind;
+  incidentCount: number;
+  active: number;
+  recovered: number;
+  criticalCount: number;
+  highCount: number;
+  /** Unique (executionId) pairs that have this kind. */
+  affectedExecutions: number;
+  /** Sum of escalationCount for this kind. */
+  totalEscalations: number;
+  lastTransitionAt: string | null;
+}
+
+/**
+ * Cross-cutting correlation between multiple incidents. Used by
+ * `/api/incidents/correlations` to surface patterns like
+ * "5 score-drop incidents across claude-code in the last hour" or
+ * "2 simultaneous level-regression on the same agent".
+ *
+ * The correlationKey is one of:
+ *   - `agent:${AgentType}` — incidents grouped by agent
+ *   - `kind:${HealthAnomalyKind}` — incidents grouped by kind
+ *   - `agent-kind:${AgentType}:${HealthAnomalyKind}` — both axes
+ */
+export interface IncidentCorrelation {
+  correlationKey: string;
+  /** Free-form dimension label (e.g. 'agent', 'kind', 'agent-kind'). */
+  dimension: 'agent' | 'kind' | 'agent-kind';
+  /** Whether this correlation represents an active or historical pattern. */
+  status: 'active' | 'mixed';
+  affectedExecutions: number;
+  affectedAgents: string[];
+  incidentCount: number;
+  activeCount: number;
+  recoveredCount: number;
+  /** Worst severity observed across the correlated incidents. */
+  worstSeverity: HealthAnomalySeverity;
+  /** The kind that appears most frequently (only meaningful for agent / agent-kind). */
+  dominantKind: HealthAnomalyKind | null;
+  /** Frequency signal: avg incidents per affected execution (≥1.0). */
+  degradationFrequency: number;
+  /** ISO timestamp of the most recent transition within this correlation. */
+  lastTransitionAt: string | null;
+  /** AgentType when dimension includes 'agent' or 'agent-kind'. */
+  agentType?: string;
+  /** Kind when dimension includes 'kind' or 'agent-kind'. */
+  kind?: HealthAnomalyKind;
+}
+
+/**
+ * Workspace-level correlation snapshot. Returned by
+ * `/api/incidents/correlations`.
+ */
+export interface IncidentCorrelationSummary {
+  correlations: IncidentCorrelation[];
+  /** Total active incidents across all correlations. */
+  totalActive: number;
+  /** Total recovered incidents across all correlations. */
+  totalRecovered: number;
+  /** Number of distinct agents with ≥1 incident. */
+  affectedAgentCount: number;
+  /** Number of distinct executions with ≥1 incident. */
+  affectedExecutionCount: number;
+  /** Most-correlated agent (by total incidentCount, descending). */
+  topAgent: string | null;
+  /** Most-correlated kind (by total incidentCount, descending). */
+  topKind: HealthAnomalyKind | null;
+  computedAt: string;
+}

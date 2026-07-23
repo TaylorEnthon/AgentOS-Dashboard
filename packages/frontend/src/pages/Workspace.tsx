@@ -469,12 +469,16 @@ function AttentionQueueSection({ items }: { items: AttentionItemDto[] }) {
  */
 function IncidentSection() {
   const [data, setData] = useState<import('../lib/api').IncidentSummaryDto | null>(null);
+  const [corr, setCorr] = useState<import('../lib/api').IncidentCorrelationSummaryDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => api.incidentSummary({ topAffectedLimit: 5, recentRecoveredLimit: 5 })
-      .then((d) => { if (!cancelled) { setData(d); setErr(null); } })
+    const load = () => Promise.all([
+      api.incidentSummary({ topAffectedLimit: 5, recentRecoveredLimit: 5 }),
+      api.incidentCorrelations(),
+    ])
+      .then(([d, c]) => { if (!cancelled) { setData(d); setCorr(c); setErr(null); } })
       .catch((e) => { if (!cancelled) setErr(String(e)); });
     load();
     const t = setInterval(load, 30_000);
@@ -488,6 +492,7 @@ function IncidentSection() {
         <CardDescription>
           Anomaly-driven health incidents (score drops / level regressions /
           rapid degradation) tracked through detected → ongoing → recovered.
+          v1.9 adds cross-incident correlation (per-agent / per-kind / combined).
           Read-only.
         </CardDescription>
       </CardHeader>
@@ -509,7 +514,41 @@ function IncidentSection() {
               <Badge tone="muted" className="text-xs">
                 {data.highCount} high
               </Badge>
+              {corr && corr.affectedAgentCount > 0 && (
+                <Badge tone="muted" className="text-xs">
+                  {corr.affectedAgentCount} agent{corr.affectedAgentCount === 1 ? '' : 's'}
+                </Badge>
+              )}
             </div>
+
+            {/* v1.9: Cross-incident correlation patterns */}
+            {corr && corr.correlations.length > 0 && (
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Incident patterns</h4>
+                <ul className="space-y-1">
+                  {corr.correlations.slice(0, 5).map((c) => (
+                    <li key={c.correlationKey} className="flex items-baseline gap-2 text-xs">
+                      <Badge tone="muted" className="text-[10px] uppercase shrink-0">{c.dimension}</Badge>
+                      <span className="font-mono text-[11px] text-foreground/90 truncate flex-1" title={c.correlationKey}>
+                        {c.correlationKey}
+                      </span>
+                      <Badge
+                        tone={c.worstSeverity === 'critical' ? 'danger' : 'warning'}
+                        className="text-[10px] uppercase shrink-0"
+                      >
+                        {c.worstSeverity}
+                      </Badge>
+                      <span className="tabular-nums text-muted-foreground shrink-0">{c.incidentCount}</span>
+                      {c.activeCount > 0 && (
+                        <span className="text-rose-700 dark:text-rose-400 tabular-nums text-[10px] shrink-0">
+                          ({c.activeCount} active)
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             {data.topAffected.length > 0 && (
               <div>

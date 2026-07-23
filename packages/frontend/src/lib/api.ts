@@ -550,6 +550,81 @@ export interface HealthIncidentDetailDto extends HealthIncidentDto {
   computedAt: string;
 }
 
+/* v1.9: Incident correlation & intelligence */
+
+export interface ExecutionIncidentInsightDto {
+  executionId: string;
+  kinds: Array<'score-drop' | 'level-regression' | 'rapid-degradation'>;
+  incidents: number;
+  active: number;
+  recovered: number;
+  worstSeverity: 'high' | 'critical';
+  totalEscalations: number;
+  lastTransitionAt: string | null;
+}
+
+export interface AgentIncidentInsightDto {
+  agentType: string;
+  affectedExecutions: number;
+  incidentCount: number;
+  active: number;
+  recovered: number;
+  criticalCount: number;
+  highCount: number;
+  totalEscalations: number;
+  worstSeverity: 'high' | 'critical';
+  lastTransitionAt: string | null;
+}
+
+export interface KindIncidentInsightDto {
+  kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
+  incidentCount: number;
+  active: number;
+  recovered: number;
+  criticalCount: number;
+  highCount: number;
+  affectedExecutions: number;
+  totalEscalations: number;
+  lastTransitionAt: string | null;
+}
+
+export interface IncidentCorrelationDto {
+  correlationKey: string;
+  dimension: 'agent' | 'kind' | 'agent-kind';
+  status: 'active' | 'mixed';
+  affectedExecutions: number;
+  affectedAgents: string[];
+  incidentCount: number;
+  activeCount: number;
+  recoveredCount: number;
+  worstSeverity: 'high' | 'critical';
+  dominantKind: 'score-drop' | 'level-regression' | 'rapid-degradation' | null;
+  degradationFrequency: number;
+  lastTransitionAt: string | null;
+  agentType?: string;
+  kind?: 'score-drop' | 'level-regression' | 'rapid-degradation';
+}
+
+export interface IncidentCorrelationSummaryDto {
+  correlations: IncidentCorrelationDto[];
+  totalActive: number;
+  totalRecovered: number;
+  affectedAgentCount: number;
+  affectedExecutionCount: number;
+  topAgent: string | null;
+  topKind: 'score-drop' | 'level-regression' | 'rapid-degradation' | null;
+  computedAt: string;
+}
+
+export interface AgentIncidentBundleDto {
+  agentType: string;
+  aggregate: AgentIncidentInsightDto | null;
+  byKind: KindIncidentInsightDto[];
+  byExecution: ExecutionIncidentInsightDto[];
+  incidents: HealthIncidentDto[];
+  computedAt: string;
+}
+
 export interface IncidentSummaryDto {
   active: number;
   recovered: number;
@@ -789,6 +864,14 @@ export const api = {
     const qs = params.toString();
     return http<IncidentSummaryDto>(`/api/incidents/summary${qs ? `?${qs}` : ''}`);
   },
+  incidentCorrelations: (opts?: { minIncidents?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.minIncidents != null) params.set('minIncidents', String(opts.minIncidents));
+    const qs = params.toString();
+    return http<IncidentCorrelationSummaryDto>(`/api/incidents/correlations${qs ? `?${qs}` : ''}`);
+  },
+  agentIncidents: (agentType: string) =>
+    http<AgentIncidentBundleDto>(`/api/agents/${encodeURIComponent(agentType)}/incidents`),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
 };

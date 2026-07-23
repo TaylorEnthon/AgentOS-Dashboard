@@ -102,6 +102,7 @@ export function useSse(path: string, opts: UseSseOptions = {}): UseSseResult {
         'incident_detected',           // v1.8: health incident intelligence
         'incident_escalated',          // v1.8: severity escalation
         'incident_recovered',          // v1.8: lifecycle recovery
+        'incident_correlation_refresh',// v1.9: cross-incident refresh hint
       ]) {
         es.addEventListener(t, onMessage as EventListener);
       }
