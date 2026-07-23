@@ -900,7 +900,12 @@ export interface HealthAnomalyOptions {
  * passes.
  *
  * Pure-derived from `execution_attention_history` rows where
- * `attention_key = 'investigate-anomaly'` and `severity IN ('high','critical')`.
+ * `attention_key = 'investigate-anomaly-*'` and `severity IN ('high','critical')`.
+ *
+ * v1.8: severity evolution — `initialSeverity`, `currentSeverity`,
+ * `maxSeverity` track how severity changed across the incident's
+ * lifetime. `escalationCount` is the number of severity upgrades
+ * (high → critical). Severity never downgrades automatically.
  */
 export interface HealthIncident {
   /** Stable incident key = `${executionId}|${anomalyKind}`. */
@@ -908,8 +913,16 @@ export interface HealthIncident {
   executionId: string;
   /** Anomaly kind that triggered the incident (mirrors HealthAnomalyKind). */
   kind: HealthAnomalyKind;
-  /** Worst severity observed across the incident's lifetime. */
+  /** Worst severity observed across the incident's lifetime (= maxSeverity). */
   severity: HealthAnomalySeverity;
+  /** Severity of the first 'detected' row. Same as maxSeverity for never-escalated incidents. */
+  initialSeverity: HealthAnomalySeverity;
+  /** Severity of the most recent transition row. May be 'low' if the latest row is a recovery row. */
+  currentSeverity: HealthAnomalySeverity | 'low';
+  /** Worst severity ever observed (alias for `severity`). */
+  maxSeverity: HealthAnomalySeverity;
+  /** Count of severity upgrades (high→critical). 0 if never escalated. */
+  escalationCount: number;
   /** ISO timestamp of the first 'detected' row. */
   detectedAt: string;
   /** ISO timestamp of the latest transition (ongoing or recovered). null when still in 'detected'. */
@@ -922,6 +935,52 @@ export interface HealthIncident {
   durationMs: number | null;
   /** Reason text (from the anomaly that triggered detection). */
   reason: string;
+}
+
+/**
+ * Detailed transition record — one per attention row that wrote
+ * a 'detected' / 'ongoing' / 'recovered' state change.
+ *
+ * Used in HealthIncidentDetail.transitions for the per-incident
+ * timeline view.
+ */
+export interface IncidentTransition {
+  /** ISO timestamp of this transition row. */
+  at: string;
+  /** Lifecycle state written at this point. */
+  lifecycle: AttentionLifecycleState;
+  /** Severity written at this point (note: recovery rows always use 'low'). */
+  severity: HealthAnomalySeverity | 'low';
+  /** Reason text from the attention row (for detected/ongoing: [kind] message; for recovered: 'No longer in attention queue'). */
+  reason: string;
+}
+
+/**
+ * Severity upgrade record — emitted when severity escalates from
+ * 'high' to 'critical' (the only allowed upgrade direction).
+ */
+export interface IncidentSeverityChange {
+  /** ISO timestamp of the row that introduced the new (higher) severity. */
+  at: string;
+  /** Previous severity (always 'high' in v1.8 — only one upgrade direction). */
+  from: HealthAnomalySeverity;
+  /** New severity (always 'critical'). */
+  to: HealthAnomalySeverity;
+  /** Why did severity change. For now always 'anomaly-fired-with-critical-severity'. */
+  reason: string;
+}
+
+/**
+ * Per-incident detail returned by `GET /api/incidents/:incidentKey`.
+ * Same fields as HealthIncident plus a chronological timeline.
+ */
+export interface HealthIncidentDetail extends HealthIncident {
+  /** Every lifecycle row that produced this incident (oldest → newest). */
+  transitions: IncidentTransition[];
+  /** Every severity upgrade that happened (empty for never-escalated incidents). */
+  severityHistory: IncidentSeverityChange[];
+  /** When this detail was computed. */
+  computedAt: string;
 }
 
 /**

@@ -1023,41 +1023,56 @@ function HealthTimelineView({ executionId }: { executionId: string }) {
           <Button size="sm" variant="outline" onClick={() => { setFrom(''); setTo(''); }}>Clear range</Button>
         </div>
 
-        {/* v1.7: incident lifecycle summary */}
+        {/* v1.7 + v1.8: incident lifecycle summary (severity evolution included) */}
         {incidents.length > 0 && (
-          <details className="rounded border border-border bg-muted/20 p-2">
+          <details open className="rounded border border-border bg-muted/20 p-2">
             <summary className="cursor-pointer text-xs font-medium">
               {incidents.filter((i) => i.lifecycle !== 'recovered').length} active /{' '}
               {incidents.filter((i) => i.lifecycle === 'recovered').length} recovered incidents
+              {' · '}
+              {incidents.filter((i) => i.escalationCount > 0).length} escalated
             </summary>
-            <ul className="mt-2 space-y-1">
+            <ul className="mt-2 space-y-2">
               {incidents.map((inc) => (
-                <li key={inc.incidentKey} className="flex flex-wrap items-baseline gap-2 text-xs">
-                  <Badge
-                    tone={inc.severity === 'critical' ? 'danger' : 'warning'}
-                    className="text-[10px] uppercase"
-                  >
-                    {inc.severity}
-                  </Badge>
-                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{inc.kind}</span>
-                  <span
-                    className={cn(
-                      'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
-                      inc.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
-                      inc.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
-                                                    'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
-                    )}
-                  >
-                    {inc.lifecycle}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground">
-                    detected {formatRelative(inc.detectedAt)}
-                  </span>
-                  {inc.recoveredAt && (
-                    <span className="text-[10px] text-emerald-700 dark:text-emerald-400">
-                      recovered {formatRelative(inc.recoveredAt)} ({Math.round((inc.durationMs ?? 0) / 60_000)}m)
+                <li key={inc.incidentKey} className="space-y-1 border-l border-border pl-2 text-xs">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <Badge
+                      tone={inc.severity === 'critical' ? 'danger' : 'warning'}
+                      className="text-[10px] uppercase"
+                    >
+                      {inc.severity}
+                    </Badge>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{inc.kind}</span>
+                    <span
+                      className={cn(
+                        'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+                        inc.lifecycle === 'detected'  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300' :
+                        inc.lifecycle === 'ongoing'   ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' :
+                                                      'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
+                      )}
+                    >
+                      {inc.lifecycle}
                     </span>
-                  )}
+                    {/* v1.8: severity evolution summary */}
+                    {inc.escalationCount > 0 && (
+                      <span className="text-[10px] text-rose-700 dark:text-rose-400">
+                        ↑ escalated {inc.escalationCount}×
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+                    <span>init {inc.initialSeverity}</span>
+                    <span>now {inc.currentSeverity}</span>
+                    <span>max {inc.maxSeverity}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+                    <span>detected {formatRelative(inc.detectedAt)}</span>
+                    {inc.recoveredAt && (
+                      <span className="text-emerald-700 dark:text-emerald-400">
+                        recovered {formatRelative(inc.recoveredAt)} ({Math.round((inc.durationMs ?? 0) / 60_000)}m)
+                      </span>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>

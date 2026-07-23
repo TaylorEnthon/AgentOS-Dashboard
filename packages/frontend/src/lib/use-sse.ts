@@ -98,7 +98,10 @@ export function useSse(path: string, opts: UseSseOptions = {}): UseSseResult {
         'scan_completed',
         'file_changed',
         'agent_status',
-        'lifecycle_changed', // v1.2: lifecycle runtime
+        'lifecycle_changed',            // v1.2: lifecycle runtime
+        'incident_detected',           // v1.8: health incident intelligence
+        'incident_escalated',          // v1.8: severity escalation
+        'incident_recovered',          // v1.8: lifecycle recovery
       ]) {
         es.addEventListener(t, onMessage as EventListener);
       }

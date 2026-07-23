@@ -34,7 +34,7 @@ import {
   healthHistoryStore,
 } from './health-history.js';
 import { detectHealthAnomalies } from './health-anomaly.js';
-import { extractKind, rowsToIncident, summarizeIncidents } from './incident-summary.js';
+import { extractKind, rowsToIncident, rowsToIncidentDetail, summarizeIncidents } from './incident-summary.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -862,10 +862,17 @@ export function registerRoutes(
     // user's state — anomaly rows live in `execution_attention_history`
     // alongside the existing v1.3 queue items, distinguished by
     // attention_key = 'investigate-anomaly'.
+    // v1.8: forward incident realtime events (incident_detected /
+    // incident_escalated / incident_recovered) to the EventBus so
+    // SSE subscribers see lifecycle transitions live.
     for (const inp of inputs) {
       const history = healthHistoryStore.read(inp.executionId, 200);
       if (history.length >= 2) {
-        attentionHistoryStore.reconcileAnomalies(history);
+        attentionHistoryStore.reconcileAnomalies(history, undefined, {
+          emit: (ev) => {
+            eventBus.emit({ ...ev, ts: new Date().toISOString() });
+          },
+        });
       }
     }
 
@@ -1080,6 +1087,45 @@ export function registerRoutes(
         return Date.parse(b.detectedAt) - Date.parse(a.detectedAt);
       });
       return incidents;
+    },
+  );
+
+  // v1.8: per-incident detail — returns HealthIncidentDetail for one
+  // incidentKey. Pure read; no SQL writes; no DB joins.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey',
+    async (req, reply) => {
+      const key = req.params.incidentKey;
+      // Validate shape: `${executionId}|${kind}` where executionId
+      // contains at least one ':' (we treat anything before the LAST
+      // ':exec-' as the session id).
+      const lastPipe = key.lastIndexOf('|');
+      if (lastPipe < 0 || lastPipe === key.length - 1) {
+        return reply.code(400).send({ error: 'invalid incidentKey' });
+      }
+      const executionId = key.slice(0, lastPipe);
+      const lastColon = executionId.lastIndexOf(':exec-');
+      if (lastColon < 0) {
+        return reply.code(400).send({ error: 'invalid executionId in incidentKey' });
+      }
+      const sessionId = executionId.slice(0, lastColon);
+      if (!db.getSession(sessionId)) {
+        return reply.code(404).send({ error: 'session not found' });
+      }
+      // Read this execution's full attention history and pull out
+      // rows whose attentionKey matches the kind portion of the key.
+      const kind = key.slice(lastPipe + 1);
+      const allRows = attentionHistoryStore.read(executionId, 1000);
+      const filtered = allRows.filter((r) => {
+        // umbrella 'investigate-anomaly' OR per-kind match
+        if (kind === 'investigate-anomaly') return r.attentionKey === 'investigate-anomaly';
+        return r.attentionKey === `investigate-anomaly-${kind}`;
+      });
+      const detail = rowsToIncidentDetail(filtered);
+      if (!detail) {
+        return reply.code(404).send({ error: 'incident not found' });
+      }
+      return detail;
     },
   );
 

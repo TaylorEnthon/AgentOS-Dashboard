@@ -39,9 +39,63 @@ import {
 } from './health-history-repository.js';
 import type { Db } from './db.js';
 import { anomaliesToAttentionItems, detectHealthAnomalies } from './health-anomaly.js';
+import type { IncidentRealtimeEvent } from './incident-events.js';
 
 const DEFAULT_MAX_ENTRIES = 200;     // per execution (in-memory fallback)
 const DEFAULT_MIN_INTERVAL_MS = 5 * 60_000; // 5 min dedup window for same level
+
+/* ---------------- v1.8 helpers for incident emission ---------------- */
+
+/** True iff the attention_key is one of the anomaly-derived actions. */
+function isAnomalyKey(key: string): boolean {
+  return key === 'investigate-anomaly' || key.startsWith('investigate-anomaly-');
+}
+
+/** Extract HealthAnomalyKind from a per-kind action key. */
+function kindFromAction(key: string): import('@agentos/shared').HealthAnomalyKind {
+  if (key === 'investigate-anomaly-score-drop')         return 'score-drop';
+  if (key === 'investigate-anomaly-level-regression')   return 'level-regression';
+  if (key === 'investigate-anomaly-rapid-degradation')  return 'rapid-degradation';
+  // umbrella or unknown — fall back to score-drop as the most common
+  return 'score-drop';
+}
+
+/**
+ * Count how many times severity escalated (high→critical) for one
+ * (exec, attention_key) pair by walking its history rows.
+ */
+function countAnomalyEscalations(executionId: string, attentionKey: string): number {
+  if (!attentionRepo) return 0;
+  const rows = attentionRepo
+    .readAttention(executionId, 1000)
+    .filter((r) => r.attention_key === attentionKey && r.lifecycle_state !== 'recovered')
+    .sort((a, b) => a.id - b.id);
+  let count = 0;
+  let lastReal: 'high' | 'critical' | null = null;
+  for (const r of rows) {
+    const s = r.severity === 'critical' ? 'critical' : 'high';
+    if (lastReal === 'high' && s === 'critical') count++;
+    lastReal = s;
+  }
+  return count;
+}
+
+/** Highest severity ever observed for (exec, attention_key). */
+function previousHighestSeverity(
+  executionId: string,
+  attentionKey: string,
+): 'high' | 'critical' | null {
+  if (!attentionRepo) return null;
+  const rows = attentionRepo.readAttention(executionId, 1000)
+    .filter((r) => r.attention_key === attentionKey && r.lifecycle_state !== 'recovered');
+  let highest: 'high' | 'critical' | null = null;
+  for (const r of rows) {
+    const s = r.severity === 'critical' ? 'critical' : 'high';
+    if (s === 'critical') return 'critical'; // can't get higher
+    if (highest === null) highest = s;
+  }
+  return highest;
+}
 
 /* ---------------- module-level backend binding ---------------- */
 
@@ -273,9 +327,10 @@ class AttentionHistoryStore {
   reconcileFromQueue(
     queue: AttentionItem[],
     nowIso: string = new Date().toISOString(),
-    options: { scanExecutionIds?: string[] } = {},
+    options: { scanExecutionIds?: string[]; emit?: import('./incident-events.js').IncidentEventEmitter } = {},
   ): AttentionHistoryEntry[] {
     const out: AttentionHistoryEntry[] = [];
+    const emit = options.emit ?? (() => { /* noop */ });
     const currentByExec = new Map<string, Map<string, { severity: AttentionSeverity; reason: string }>>();
     for (const it of queue) {
       let m = currentByExec.get(it.executionId);
@@ -322,7 +377,31 @@ class AttentionHistoryStore {
               lifecycle_state: 'detected',
               severity: info.severity, reason: info.reason, created_at: nowIso,
             }));
+            // v1.8: emit incident_detected (only for anomaly keys; the
+            // umbrella `investigate-anomaly` and the per-kind variants
+            // are all incident-derived). Other keys (conflict/blocked)
+            // skip the emission to avoid noise.
+            if (isAnomalyKey(key)) {
+              emit({
+                type: 'incident_detected',
+                incidentKey: `${execId}|${kindFromAction(key)}`,
+                executionId: execId,
+                kind: kindFromAction(key),
+                severity: info.severity === 'critical' ? 'critical' : 'high',
+              });
+            }
           } else {
+            // v1.8: detect escalation BEFORE writing the new row,
+            // so the previous-highest calculation doesn't include
+            // the row we're about to insert.
+            const newSeverity = info.severity === 'critical' ? 'critical' : 'high';
+            let escalationDetected = false;
+            if (isAnomalyKey(key)) {
+              const prevHighest = previousHighestSeverity(execId, key);
+              if (prevHighest === 'high' && newSeverity === 'critical') {
+                escalationDetected = true;
+              }
+            }
             // prev was 'detected' or 'ongoing' and still in queue: write 'ongoing'
             attentionRepo.insertAttention({
               executionId: execId, attentionKey: key,
@@ -334,6 +413,18 @@ class AttentionHistoryStore {
               lifecycle_state: 'ongoing',
               severity: info.severity, reason: info.reason, created_at: nowIso,
             }));
+            if (escalationDetected) {
+              const prevEscalationCount = countAnomalyEscalations(execId, key);
+              emit({
+                type: 'incident_escalated',
+                incidentKey: `${execId}|${kindFromAction(key)}`,
+                executionId: execId,
+                kind: kindFromAction(key),
+                fromSeverity: 'high',
+                toSeverity: 'critical',
+                escalationCount: prevEscalationCount + 1,
+              });
+            }
           }
         }
       }
@@ -343,6 +434,14 @@ class AttentionHistoryStore {
         const [executionId, attentionKey] = composite.split('|') as [string, string];
         const prev = attentionRepo.getAttentionState(executionId, attentionKey);
         if (prev === 'recovered' || prev === null) continue;
+        // Compute durationMs from the earliest 'detected' row to now.
+        const detectedRow = attentionRepo
+          .readAttention(executionId, 1000)
+          .filter((r) => r.attention_key === attentionKey && r.lifecycle_state === 'detected')
+          .sort((a, b) => a.id - b.id)[0];
+        const durationMs = detectedRow
+          ? Math.max(0, Date.parse(nowIso) - Date.parse(detectedRow.created_at))
+          : null;
         attentionRepo.insertAttention({
           executionId, attentionKey,
           lifecycle: 'recovered',
@@ -353,6 +452,16 @@ class AttentionHistoryStore {
           lifecycle_state: 'recovered',
           severity: 'low', reason: 'No longer in attention queue', created_at: nowIso,
         }));
+        // v1.8: emit incident_recovered for anomaly-derived pairs only.
+        if (isAnomalyKey(attentionKey)) {
+          emit({
+            type: 'incident_recovered',
+            incidentKey: `${executionId}|${kindFromAction(attentionKey)}`,
+            executionId,
+            kind: kindFromAction(attentionKey),
+            durationMs,
+          });
+        }
       }
       return out;
     }
@@ -455,6 +564,7 @@ class AttentionHistoryStore {
   reconcileAnomalies(
     history: import('@agentos/shared').HealthSnapshotHistory[],
     nowIso: string = new Date().toISOString(),
+    options: { emit?: import('./incident-events.js').IncidentEventEmitter } = {},
   ): AttentionHistoryEntry[] {
     const anomalies = detectHealthAnomalies(history);
     const items = anomaliesToAttentionItems(anomalies);
@@ -462,7 +572,7 @@ class AttentionHistoryStore {
     // path can detect anomalies that DISAPPEARED between calls (those
     // get a 'recovered' row).
     const execIds = Array.from(new Set(history.map((h) => h.executionId)));
-    return this.reconcileFromQueue(items, nowIso, { scanExecutionIds: execIds });
+    return this.reconcileFromQueue(items, nowIso, { scanExecutionIds: execIds, emit: options.emit });
   }
 
   /**

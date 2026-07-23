@@ -56,6 +56,39 @@ export type RealtimeEvent =
       previousDerivedStatus: import('@agentos/shared').DerivedLifecycleStatus | null;
       confidence: import('@agentos/shared').LifecycleConfidence;
       reason: string;
+    }
+  | {
+      // v1.8: emitted when an anomaly-derived incident is FIRST detected
+      // (i.e. the (exec, kind) pair was never seen before). Slim payload —
+      // the frontend can call /api/incidents/:key for full detail.
+      type: 'incident_detected';
+      ts: string;
+      incidentKey: string;
+      executionId: string;
+      kind: import('@agentos/shared').HealthAnomalyKind;
+      severity: import('@agentos/shared').HealthAnomalySeverity;
+    }
+  | {
+      // v1.8: emitted when an active incident's severity escalates
+      // (high → critical). Slim payload — same source as incident_detected.
+      type: 'incident_escalated';
+      ts: string;
+      incidentKey: string;
+      executionId: string;
+      kind: import('@agentos/shared').HealthAnomalyKind;
+      fromSeverity: import('@agentos/shared').HealthAnomalySeverity;
+      toSeverity: import('@agentos/shared').HealthAnomalySeverity;
+      escalationCount: number;
+    }
+  | {
+      // v1.8: emitted when a previously-active incident transitions
+      // to 'recovered' (the anomaly stopped firing across reconciliations).
+      type: 'incident_recovered';
+      ts: string;
+      incidentKey: string;
+      executionId: string;
+      kind: import('@agentos/shared').HealthAnomalyKind;
+      durationMs: number | null;
     };
 
 export type RealtimeEventListener = (ev: RealtimeEvent) => void;

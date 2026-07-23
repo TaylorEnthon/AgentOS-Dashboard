@@ -18,7 +18,10 @@ import type {
   HealthAnomalyKind,
   HealthAnomalySeverity,
   HealthIncident,
+  HealthIncidentDetail,
+  IncidentSeverityChange,
   IncidentSummary,
+  IncidentTransition,
 } from '@agentos/shared';
 
 /** Filter to anomaly-derived attention entries (umbrella + per-kind). */
@@ -87,11 +90,25 @@ export function rowsToIncident(rows: AttentionHistoryEntry[]): HealthIncident | 
     kindFromAttentionKey(last.attentionKey) ??
     extractKind(reason);
 
+  // v1.8 severity evolution:
+  //   - initialSeverity = first detected row's severity
+  //   - maxSeverity = worst across all rows (= `worst` computed above)
+  //   - currentSeverity = latest row's severity (recovered rows have 'low',
+  //       so a recovered incident's currentSeverity is 'low')
+  //   - escalationCount = number of severity upgrades observed
+  const initialSeverity = severityOf(detectedRow);
+  const currentSeverity = currentSeverityOf(last);
+  const escalationCount = countEscalations(sorted);
+
   return {
     incidentKey: `${first.executionId}|${kind}`,
     executionId: first.executionId,
     kind,
     severity: worst,
+    initialSeverity,
+    currentSeverity,
+    maxSeverity: worst,
+    escalationCount,
     detectedAt,
     lastTransitionAt,
     lifecycle,
@@ -99,6 +116,40 @@ export function rowsToIncident(rows: AttentionHistoryEntry[]): HealthIncident | 
     durationMs,
     reason,
   };
+}
+
+/** Coerce a row's severity to HealthAnomalySeverity (recovered rows are 'low', not a real severity). */
+function severityOf(row: AttentionHistoryEntry): HealthAnomalySeverity {
+  return row.severity === 'critical' ? 'critical' : 'high';
+}
+
+/** Severity for the current/latest row, including 'low' for recovery rows. */
+function currentSeverityOf(row: AttentionHistoryEntry): HealthAnomalySeverity | 'low' {
+  if (row.lifecycle === 'recovered') return 'low';
+  return row.severity === 'critical' ? 'critical' : 'high';
+}
+
+/**
+ * Count severity upgrades across a chronologically-sorted slice.
+ * Severity never downgrades in v1.8 (no rule for that), so each
+ * observed upgrade is one step 'high' → 'critical'.
+ *
+ * Algorithm: walk rows oldest → newest, track currentSeverity, and
+ * count every time it transitions to 'critical' (the only allowed
+ * upgrade direction). Initial severity ignored (it sets the baseline,
+ * not an upgrade event).
+ */
+function countEscalations(sorted: AttentionHistoryEntry[]): number {
+  let count = 0;
+  // Track the last *real* (non-recovered) severity to detect transitions.
+  let lastRealSeverity: HealthAnomalySeverity | null = null;
+  for (const r of sorted) {
+    if (r.lifecycle === 'recovered') continue; // recovered rows are 'low', not a real signal
+    const s = severityOf(r);
+    if (lastRealSeverity === 'high' && s === 'critical') count++;
+    lastRealSeverity = s;
+  }
+  return count;
 }
 
 const KIND_PATTERN = /^\[(score-drop|level-regression|rapid-degradation)\]/;
@@ -210,4 +261,93 @@ export function summarizeIncidents(
     recentRecovered,
     computedAt,
   };
+}
+
+/* ---------------- 3. Per-incident detail (v1.8) ---------------- */
+
+/**
+ * Build a HealthIncidentDetail for one (executionId, kind) pair.
+ *
+ * Returns null if `rows` is empty or contains no anomaly-derived rows.
+ *
+ * The returned object extends HealthIncident with:
+ *   - `transitions`: chronological list of every state change
+ *   - `severityHistory`: every severity upgrade (only high→critical in v1.8)
+ *   - `computedAt`: when this detail was computed
+ *
+ * Pure / read-only.
+ */
+export function rowsToIncidentDetail(
+  rows: AttentionHistoryEntry[],
+  opts: { nowMs?: number } = {},
+): HealthIncidentDetail | null {
+  const anomalies = rows.filter(isAnomalyEntry);
+  if (anomalies.length === 0) return null;
+
+  // Group by (executionId, kind) — pick the first matching group.
+  // Caller is expected to pass rows for ONE (exec, kind) pair.
+  const incident = rowsToIncident(anomalies);
+  if (!incident) return null;
+
+  // Chronological transitions (one per row).
+  const sorted = anomalies.slice().sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+  const transitions: IncidentTransition[] = sorted.map((r) => ({
+    at: r.createdAt,
+    lifecycle: r.lifecycle,
+    // Recovery rows are severity 'low' but we surface that explicitly.
+    severity: r.lifecycle === 'recovered' ? 'low' : r.severity === 'critical' ? 'critical' : 'high',
+    reason: r.reason,
+  }));
+
+  // Severity upgrade history.
+  const severityHistory: IncidentSeverityChange[] = [];
+  let lastRealSeverity: HealthAnomalySeverity | null = null;
+  for (const r of sorted) {
+    if (r.lifecycle === 'recovered') continue;
+    const s = severityOf(r);
+    if (lastRealSeverity === 'high' && s === 'critical') {
+      severityHistory.push({
+        at: r.createdAt,
+        from: 'high',
+        to: 'critical',
+        reason: 'Anomaly fired with critical severity (e.g. large score drop or critical-level regression)',
+      });
+    }
+    lastRealSeverity = s;
+  }
+
+  return {
+    ...incident,
+    transitions,
+    severityHistory,
+    computedAt: new Date(opts.nowMs ?? Date.now()).toISOString(),
+  };
+}
+
+/**
+ * Group attention rows by (executionId, kind) and build a detail
+ * for each group. Returns a map keyed by incidentKey.
+ *
+ * Useful for the route handler that needs to look up one specific
+ * incident by key without re-grouping the whole attention history.
+ */
+export function buildAllIncidentDetails(
+  rows: AttentionHistoryEntry[],
+  opts: { nowMs?: number } = {},
+): Map<string, HealthIncidentDetail> {
+  const anomalies = rows.filter(isAnomalyEntry);
+  const groups = new Map<string, AttentionHistoryEntry[]>();
+  for (const r of anomalies) {
+    const kind = kindFromAttentionKey(r.attentionKey) ?? extractKind(r.reason);
+    const key = `${r.executionId}|${kind}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(r);
+    else groups.set(key, [r]);
+  }
+  const out = new Map<string, HealthIncidentDetail>();
+  for (const [key, g] of groups.entries()) {
+    const d = rowsToIncidentDetail(g, opts);
+    if (d) out.set(key, d);
+  }
+  return out;
 }

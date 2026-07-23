@@ -518,12 +518,36 @@ export interface HealthIncidentDto {
   executionId: string;
   kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
   severity: 'high' | 'critical';
+  initialSeverity: 'high' | 'critical';
+  currentSeverity: 'high' | 'critical' | 'low';
+  maxSeverity: 'high' | 'critical';
+  escalationCount: number;
   detectedAt: string;
   lastTransitionAt: string | null;
   lifecycle: 'detected' | 'ongoing' | 'recovered';
   recoveredAt: string | null;
   durationMs: number | null;
   reason: string;
+}
+
+export interface IncidentTransitionDto {
+  at: string;
+  lifecycle: 'detected' | 'ongoing' | 'recovered';
+  severity: 'high' | 'critical' | 'low';
+  reason: string;
+}
+
+export interface IncidentSeverityChangeDto {
+  at: string;
+  from: 'high' | 'critical';
+  to: 'high' | 'critical';
+  reason: string;
+}
+
+export interface HealthIncidentDetailDto extends HealthIncidentDto {
+  transitions: IncidentTransitionDto[];
+  severityHistory: IncidentSeverityChangeDto[];
+  computedAt: string;
 }
 
 export interface IncidentSummaryDto {
@@ -756,6 +780,8 @@ export const api = {
     http<HealthIncidentDto[]>(
       `/api/executions/${encodeURIComponent(id)}/incidents${limit != null ? `?limit=${limit}` : ''}`,
     ),
+  incidentDetail: (incidentKey: string) =>
+    http<HealthIncidentDetailDto>(`/api/incidents/${encodeURIComponent(incidentKey)}`),
   incidentSummary: (opts?: { topAffectedLimit?: number; recentRecoveredLimit?: number }) => {
     const params = new URLSearchParams();
     if (opts?.topAffectedLimit != null)     params.set('topAffectedLimit', String(opts.topAffectedLimit));
