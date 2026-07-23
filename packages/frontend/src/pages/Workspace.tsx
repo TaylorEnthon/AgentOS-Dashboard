@@ -1085,6 +1085,7 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
                     ))}
                   </ul>
                   <HistoricalContextBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
+                  <RootCauseEvidenceBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                 </div>
               )}
             </>
@@ -1151,6 +1152,56 @@ function HistoricalContextBlock({ incidentKey }: { incidentKey: string }) {
           {ctx.lastSeen && <> · last seen {formatRelative(ctx.lastSeen)}</>}
         </p>
       )}
+    </div>
+  );
+}
+
+/* ---------------- v1.14: Root Cause Evidence Block ----------------
+ *
+ * Lazy-loaded root-cause evidence for the FIRST related incident of
+ * an investigation. Renders ordered `kind / message / confidence`
+ * triples that explain WHY this incident might be happening. Data
+ * is deterministic and read-only — no ML, no mutation.
+ *
+ * Fetches on first render, caches in state. Silently degrades to a
+ * single loading line on failure.
+ */
+function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
+  const [ev, setEv] = useState<import('../lib/api').IncidentRootCauseEvidenceDto | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.incidentEvidence(incidentKey)
+      .then((d) => { if (!cancelled) setEv(d); })
+      .catch((e) => { if (!cancelled) setErr(String(e)); });
+    return () => { cancelled = true; };
+  }, [incidentKey]);
+
+  if (err) return <p className="text-[10px] text-rose-600 mt-1">evidence: {err}</p>;
+  if (!ev) return <p className="text-[10px] text-muted-foreground mt-1">loading evidence…</p>;
+  if (!ev.hasEvidence) return null;
+
+  const toneForConfidence = (c: number): 'muted' | 'info' | 'warning' | 'danger' | 'success' =>
+    c >= 0.85 ? 'success' : c >= 0.6 ? 'info' : c >= 0.3 ? 'warning' : 'muted';
+
+  return (
+    <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
+      <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        Root cause evidence — {ev.kind}
+      </h5>
+      <ul className="mt-1 space-y-0.5">
+        {ev.evidence.map((item, i) => (
+          <li key={`${item.kind}-${i}`} className="flex items-baseline gap-2 text-[10px]">
+            <Badge tone={toneForConfidence(item.confidence)} className="shrink-0 uppercase">
+              {item.kind}
+            </Badge>
+            <span className="flex-1 text-foreground/90">{item.message}</span>
+            <span className="shrink-0 tabular-nums text-muted-foreground">
+              {Math.round(item.confidence * 100)}%
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

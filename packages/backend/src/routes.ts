@@ -52,6 +52,7 @@ import {
 import { buildPriorities } from './incident-priority.js';
 import { buildInvestigation } from './incident-investigation.js';
 import { buildHistoricalContext } from './incident-history.js';
+import { buildRootCauseEvidence } from './incident-evidence.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1387,6 +1388,46 @@ export function registerRoutes(
         return reply.code(404).send({ error: 'incident not found in current pool' });
       }
       return ctx;
+    },
+  );
+
+  // v1.14: Root-cause evidence for a single incident. Generates
+  // ordered `kind / message / confidence` items explaining WHY this
+  // incident might be happening — derived from existing data only
+  // (HealthIncident pool + HistoricalContext + same-execution /
+  // same-agent rollups + optional priority insight). Read-only;
+  // no DB writes; no ML; no external API.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey/evidence',
+    async (req, reply) => {
+      const incidentKey = decodeURIComponent(req.params.incidentKey);
+      if (!incidentKey || !incidentKey.includes('|')) {
+        return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
+      }
+      const nowIso = new Date().toISOString();
+      const { incidents, execToAgent } = await collectAllIncidents(db);
+      // Reuse v1.13 historical context as evidence input.
+      const history = buildHistoricalContext({
+        incidentKey,
+        allIncidents: incidents,
+        nowIso,
+      });
+      if (!history) {
+        return reply.code(404).send({ error: 'incident not found in current pool' });
+      }
+      const evidence = buildRootCauseEvidence({
+        incidentKey,
+        allIncidents: incidents,
+        history,
+        executionToAgent: execToAgent,
+        nowIso,
+      });
+      if (!evidence) {
+        // buildHistoricalContext succeeded, so current exists; this
+        // branch is defensive against future invariant breaks.
+        return reply.code(404).send({ error: 'incident not found in current pool' });
+      }
+      return evidence;
     },
   );
 

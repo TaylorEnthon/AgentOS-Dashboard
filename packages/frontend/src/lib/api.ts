@@ -643,6 +643,33 @@ export interface IncidentHistoricalContextDto {
   computedAt: string;
 }
 
+/* v1.14: Incident Root Cause Evidence */
+
+export type RootCauseEvidenceKindDto =
+  | 'history'
+  | 'severity'
+  | 'impact'
+  | 'agent'
+  | 'trend'
+  | 'priority';
+
+export interface RootCauseEvidenceItemDto {
+  kind: RootCauseEvidenceKindDto;
+  message: string;
+  confidence: number;
+  weight: number;
+}
+
+export interface IncidentRootCauseEvidenceDto {
+  incidentKey: string;
+  executionId: string;
+  kind: 'score-drop' | 'level-regression' | 'rapid-degradation';
+  evidence: RootCauseEvidenceItemDto[];
+  confidence: number;
+  hasEvidence: boolean;
+  computedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1089,6 +1116,10 @@ export const api = {
   incidentHistory: (incidentKey: string) =>
     http<IncidentHistoricalContextDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/history`,
+    ),
+  incidentEvidence: (incidentKey: string) =>
+    http<IncidentRootCauseEvidenceDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/evidence`,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
