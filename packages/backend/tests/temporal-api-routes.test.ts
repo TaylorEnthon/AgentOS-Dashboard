@@ -91,7 +91,14 @@ test('GET /api/agents/:agentType/trend: with data returns trend', async () => {
   try {
     appendHealth(95, 'healthy', 'running', '2026-07-23T10:00:00.000Z');
     appendHealth(25, 'critical', 'failed', '2026-07-23T10:05:00.000Z');
-    attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100));
+    // v1.17 fix: pin nowIso to a time inside the test's since..until window.
+    // The default `reconcileAnomalies` uses Date.now() which moves with
+    // wall-clock; on dates after 2026-07-24 the row's createdAt falls
+    // outside the test's pinned window, making the test flake.
+    attentionHistoryStore.reconcileAnomalies(
+      healthHistoryStore.read('s1:exec-0', 100),
+      '2026-07-23T10:10:00.000Z',
+    );
 
     const res = await app.inject({
       method: 'GET',
@@ -147,7 +154,12 @@ test('GET /api/incidents/temporal: detects burst signal', async () => {
     // Force 3 score-drops in the same window
     appendHealth(95, 'healthy', 'running', '2026-07-23T11:00:00.000Z');
     appendHealth(30, 'critical', 'failed', '2026-07-23T11:05:00.000Z');
-    attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100));
+    // v1.17 fix: pin nowIso to a time inside the test's since..until window.
+    // See comment in the trend test for the rationale.
+    attentionHistoryStore.reconcileAnomalies(
+      healthHistoryStore.read('s1:exec-0', 100),
+      '2026-07-23T11:10:00.000Z',
+    );
     // Note: only one execution so agent-degradation won't fire (threshold = 3 executions)
 
     const res = await app.inject({
