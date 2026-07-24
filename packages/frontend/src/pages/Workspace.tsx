@@ -35,6 +35,7 @@ import { Badge } from '../components/ui/badge';
 import { agentColor, cn, formatCompact, formatRelative, formatUSD } from '../lib/format';
 import { useSse } from '../lib/use-sse';
 import { useInvestigationWorkspace } from '../lib/useInvestigationWorkspace';
+import { CollapsibleSection } from '../components/ui/collapsible-section';
 
 interface ColumnDef {
   key: ExecutionBoardColumn;
@@ -1085,8 +1086,6 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
                       </li>
                     ))}
                   </ul>
-                  <HistoricalContextBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
-                  <RootCauseEvidenceBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                   <InvestigationWorkspace incidentKey={data.relatedIncidents[0]!.incidentKey} />
                 </div>
               )}
@@ -1094,116 +1093,6 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-/* ---------------- v1.13: Historical Context Block ----------------
- *
- * Lazy-loaded historical context for the FIRST related incident of
- * an investigation. Shows aggregate metrics over every HealthIncident
- * in the pool with the same `kind`:
- *   - occurrenceCount / recoveredCount
- *   - averageDurationMs (when available)
- *   - lastSeen / firstSeen timestamps
- *   - recurrence badge (when escalationCount > 0 incidents dominate)
- *
- * Read-only; no mutation. Fetches on first render, caches in state,
- * silently degrades to null display on failure.
- */
-function HistoricalContextBlock({ incidentKey }: { incidentKey: string }) {
-  const [ctx, setCtx] = useState<import('../lib/api').IncidentHistoricalContextDto | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.incidentHistory(incidentKey)
-      .then((d) => { if (!cancelled) setCtx(d); })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
-    return () => { cancelled = true; };
-  }, [incidentKey]);
-
-  if (err) return <p className="text-[10px] text-rose-600 mt-1">history: {err}</p>;
-  if (!ctx) return <p className="text-[10px] text-muted-foreground mt-1">loading history…</p>;
-  if (!ctx.hasHistory) return null;
-
-  const recoveryRate = ctx.occurrenceCount > 0
-    ? Math.round((ctx.recoveredCount / ctx.occurrenceCount) * 100)
-    : 0;
-  const recurring = ctx.recurrenceRate > 0.5;
-  const avgMs = ctx.averageDurationMs;
-  const avgLabel = avgMs !== null ? formatDuration(avgMs) : '—';
-  const maxLabel = ctx.maxDurationMs !== null ? formatDuration(ctx.maxDurationMs) : '—';
-
-  return (
-    <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
-      <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        Historical context — {ctx.kind}
-      </h5>
-      <div className="mt-1 flex flex-wrap gap-1 text-[10px]">
-        <Badge tone="muted">{ctx.occurrenceCount} occurrences</Badge>
-        <Badge tone={ctx.recoveredCount === ctx.occurrenceCount && ctx.occurrenceCount > 0 ? 'success' : 'muted'}>
-          {recoveryRate}% recovered
-        </Badge>
-        <Badge tone="muted">avg {avgLabel}</Badge>
-        <Badge tone="muted">max {maxLabel}</Badge>
-        {recurring && <Badge tone="warning">recurring</Badge>}
-      </div>
-      {ctx.previousIncidents.length > 0 && (
-        <p className="text-[10px] text-muted-foreground mt-1">
-          {ctx.previousIncidents.length} prior incident{ctx.previousIncidents.length === 1 ? '' : 's'} of this kind
-          {ctx.lastSeen && <> · last seen {formatRelative(ctx.lastSeen)}</>}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/* ---------------- v1.14: Root Cause Evidence Block ----------------
- *
- * Lazy-loaded root-cause evidence for the FIRST related incident of
- * an investigation. Renders ordered `kind / message / confidence`
- * triples that explain WHY this incident might be happening. Data
- * is deterministic and read-only — no ML, no mutation.
- *
- * Fetches on first render, caches in state. Silently degrades to a
- * single loading line on failure.
- */
-function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
-  const [ev, setEv] = useState<import('../lib/api').IncidentRootCauseEvidenceDto | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.incidentEvidence(incidentKey)
-      .then((d) => { if (!cancelled) setEv(d); })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
-    return () => { cancelled = true; };
-  }, [incidentKey]);
-
-  if (err) return <p className="text-[10px] text-rose-600 mt-1">evidence: {err}</p>;
-  if (!ev) return <p className="text-[10px] text-muted-foreground mt-1">loading evidence…</p>;
-  if (!ev.hasEvidence) return null;
-
-  const toneForConfidence = (c: number): 'muted' | 'info' | 'warning' | 'danger' | 'success' =>
-    c >= 0.85 ? 'success' : c >= 0.6 ? 'info' : c >= 0.3 ? 'warning' : 'muted';
-
-  return (
-    <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
-      <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        Root cause evidence — {ev.kind}
-      </h5>
-      <ul className="mt-1 space-y-0.5">
-        {ev.evidence.map((item, i) => (
-          <li key={`${item.kind}-${i}`} className="flex items-baseline gap-2 text-[10px]">
-            <Badge tone={toneForConfidence(item.confidence)} className="shrink-0 uppercase">
-              {item.kind}
-            </Badge>
-            <span className="flex-1 text-foreground/90">{item.message}</span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">
-              {Math.round(item.confidence * 100)}%
-            </span>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
@@ -1233,13 +1122,24 @@ function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
  * The Workspace is purely presentational: data fetch lives in the
  * hook; section rendering lives in inner components below.
  */
-function InvestigationWorkspace({ incidentKey }: { incidentKey: string }) {
+// Exported for tests (v1.20). Production code consumes this only
+// through IncidentSection in this file; export does not enlarge the
+// public API surface (the page module is internal to the frontend).
+export function InvestigationWorkspace({ incidentKey }: { incidentKey: string }) {
   const {
     report, reportErr,
     actions, actionsErr,
     narrative, narrativeErr,
     timeline, timelineErr,
   } = useInvestigationWorkspace(incidentKey);
+
+  // v1.20: independent expand/collapse state per secondary section.
+  // Summary is always rendered in full (no collapsible wrapper) — it
+  // is the at-a-glance metric panel that the spec wants always visible.
+  const [narrativeOpen, setNarrativeOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
 
   // Top-level fatal: only when report itself failed AND we have no
   // data. We still render the other three sections independently —
@@ -1272,10 +1172,38 @@ function InvestigationWorkspace({ incidentKey }: { incidentKey: string }) {
         Incident investigation
       </h5>
       <InvestigationSummarySection report={report} />
-      <InvestigationNarrativeSection narrative={narrative} err={narrativeErr} />
-      <InvestigationTimelineSection timeline={timeline} err={timelineErr} />
-      <InvestigationEvidenceSection report={report} />
-      <InvestigationActionsSection actions={actions} err={actionsErr} />
+      <CollapsibleSection
+        title="Narrative"
+        expanded={narrativeOpen}
+        onExpandedChange={setNarrativeOpen}
+        hint={narrativeErr ? 'error' : narrative ? 'ready' : 'loading'}
+      >
+        <InvestigationNarrativeSection narrative={narrative} err={narrativeErr} />
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Timeline"
+        expanded={timelineOpen}
+        onExpandedChange={setTimelineOpen}
+        hint={timelineErr ? 'error' : timeline ? `${timeline.events.length} events` : 'loading'}
+      >
+        <InvestigationTimelineSection timeline={timeline} err={timelineErr} />
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Evidence"
+        expanded={evidenceOpen}
+        onExpandedChange={setEvidenceOpen}
+        hint={`${report.evidence.evidence.length} item${report.evidence.evidence.length === 1 ? '' : 's'}`}
+      >
+        <InvestigationEvidenceSection report={report} />
+      </CollapsibleSection>
+      <CollapsibleSection
+        title="Recommended actions"
+        expanded={actionsOpen}
+        onExpandedChange={setActionsOpen}
+        hint={actionsErr ? 'error' : actions ? `${actions.actions.length}` : 'loading'}
+      >
+        <InvestigationActionsSection actions={actions} err={actionsErr} />
+      </CollapsibleSection>
     </div>
   );
 }
@@ -1349,11 +1277,10 @@ function InvestigationNarrativeSection({
   narrative: import('../lib/api').IncidentInvestigationNarrativeDto | null;
   err: string | null;
 }) {
+  // v1.20: heading is provided by the parent <CollapsibleSection>;
+  // this function now only renders the body content.
   return (
     <>
-      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Narrative
-      </h6>
       {err && (
         <p className="text-[10px] text-rose-600 mt-1">narrative: {err}</p>
       )}
@@ -1401,11 +1328,9 @@ function InvestigationTimelineSection({
   timeline: import('../lib/api').IncidentInvestigationTimelineDto | null;
   err: string | null;
 }) {
+  // v1.20: heading is provided by the parent <CollapsibleSection>.
   return (
     <>
-      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Timeline
-      </h6>
       {err && (
         <p className="text-[10px] text-rose-600 mt-1">timeline: {err}</p>
       )}
@@ -1454,11 +1379,9 @@ function InvestigationEvidenceSection({
   ): 'muted' | 'info' | 'warning' | 'danger' | 'success' =>
     c >= 0.85 ? 'success' : c >= 0.6 ? 'info' : c >= 0.3 ? 'warning' : 'muted';
 
+  // v1.20: heading is provided by the parent <CollapsibleSection>.
   return (
     <>
-      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Evidence
-      </h6>
       {evidence.evidence.length === 0 && (
         <p className="text-[10px] text-muted-foreground mt-1">no evidence for this incident.</p>
       )}
@@ -1493,11 +1416,9 @@ function InvestigationActionsSection({
   const toneForActionPriority = (p: 'high' | 'medium' | 'low'): 'danger' | 'warning' | 'muted' =>
     p === 'high' ? 'danger' : p === 'medium' ? 'warning' : 'muted';
 
+  // v1.20: heading is provided by the parent <CollapsibleSection>.
   return (
     <>
-      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Recommended actions
-      </h6>
       {err && (
         <p className="text-[10px] text-rose-600 mt-1">actions: {err}</p>
       )}

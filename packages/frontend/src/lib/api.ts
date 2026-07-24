@@ -1184,21 +1184,29 @@ export const api = {
     http<IncidentRootCauseEvidenceDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/evidence`,
     ),
-  incidentReport: (incidentKey: string) =>
+  // v1.20: investigation endpoints accept an optional AbortSignal so
+  // callers (currently useInvestigationWorkspace) can cancel in-flight
+  // requests on unmount or incidentKey change instead of merely
+  // discarding their results.
+  incidentReport: (incidentKey: string, signal?: AbortSignal) =>
     http<IncidentInvestigationReportDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/report`,
+      signal ? { signal } : undefined,
     ),
-  incidentActions: (incidentKey: string) =>
+  incidentActions: (incidentKey: string, signal?: AbortSignal) =>
     http<IncidentRecommendedActionBundleDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/actions`,
+      signal ? { signal } : undefined,
     ),
-  incidentNarrative: (incidentKey: string) =>
+  incidentNarrative: (incidentKey: string, signal?: AbortSignal) =>
     http<IncidentInvestigationNarrativeDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/narrative`,
+      signal ? { signal } : undefined,
     ),
-  incidentTimeline: (incidentKey: string) =>
+  incidentTimeline: (incidentKey: string, signal?: AbortSignal) =>
     http<IncidentInvestigationTimelineDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/timeline`,
+      signal ? { signal } : undefined,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),
