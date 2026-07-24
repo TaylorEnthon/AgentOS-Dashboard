@@ -78,7 +78,7 @@ function appendHealth(score: number, level: HealthLevel, derivedStatus: string, 
 function seedScoreDropIncident(): void {
   appendHealth(95, 'healthy', 'running', '2026-07-23T11:00:00.000Z');
   appendHealth(25, 'critical', 'failed', '2026-07-23T11:05:00.000Z');
-  attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100));
+  attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100), new Date(Date.now() - 60_000).toISOString());
 }
 
 /* ---------------- /api/incidents/:incidentKey/narrative ---------------- */
@@ -152,7 +152,7 @@ test('GET /api/incidents/:incidentKey/narrative: returns 200 with full narrative
       });
       healthHistoryStore.append(`${sid}:exec-0`, { score: 95, level: 'healthy', derivedStatus: 'running', factors: [], createdAt: '2026-07-23T11:00:00.000Z' });
       healthHistoryStore.append(`${sid}:exec-0`, { score: 25, level: 'critical', derivedStatus: 'failed', factors: [], createdAt: '2026-07-23T11:05:00.000Z' });
-      attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read(`${sid}:exec-0`, 100));
+      attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read(`${sid}:exec-0`, 100), new Date(Date.now() - 60_000).toISOString());
     }
 
     const res = await app.inject({

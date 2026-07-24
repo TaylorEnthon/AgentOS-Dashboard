@@ -74,7 +74,7 @@ function appendHealth(score: number, level: HealthLevel, derivedStatus: string, 
 function seedScoreDropIncident(): void {
   appendHealth(95, 'healthy', 'running', '2026-07-23T11:00:00.000Z');
   appendHealth(25, 'critical', 'failed', '2026-07-23T11:05:00.000Z');
-  attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100));
+  attentionHistoryStore.reconcileAnomalies(healthHistoryStore.read('s1:exec-0', 100), new Date(Date.now() - 60_000).toISOString());
 }
 
 /* ---------------- /api/incidents/:incidentKey/evidence ---------------- */
