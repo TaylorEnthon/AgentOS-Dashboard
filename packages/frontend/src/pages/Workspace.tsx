@@ -34,6 +34,7 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { agentColor, cn, formatCompact, formatRelative, formatUSD } from '../lib/format';
 import { useSse } from '../lib/use-sse';
+import { useInvestigationWorkspace } from '../lib/useInvestigationWorkspace';
 
 interface ColumnDef {
   key: ExecutionBoardColumn;
@@ -1086,7 +1087,7 @@ function InvestigationPanel({ priorityId, subjectKey, subjectLabel }: {
                   </ul>
                   <HistoricalContextBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
                   <RootCauseEvidenceBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
-                  <InvestigationReportBlock incidentKey={data.relatedIncidents[0]!.incidentKey} />
+                  <InvestigationWorkspace incidentKey={data.relatedIncidents[0]!.incidentKey} />
                 </div>
               )}
             </>
@@ -1207,69 +1208,105 @@ function RootCauseEvidenceBlock({ incidentKey }: { incidentKey: string }) {
   );
 }
 
-/* ---------------- v1.15: Investigation Report Block ----------------
+/* ---------------- v1.19: Investigation Workspace ----------------
  *
- * Lazy-loaded compact summary that bundles the three per-incident
- * views (v1.12 investigation, v1.13 history, v1.14 evidence) into a
- * single panel. ONE round-trip per investigation open. Read-only.
+ * Composition of the four v1.15-v1.18 investigation endpoints
+ * (report / actions / narrative / timeline) into a single read-only
+ * Workspace panel. Five sections:
  *
- * Renders three mini-rows:
- *   - Priority summary: <level> (score <n>) · <totalRelated> incidents
- *   - Historical:       <occurrenceCount> · <recoveryPct>% recovered · <avgDuration>
- *   - Evidence:         <evidenceCount> items · max confidence <pct>%
+ *   1. Summary              — priority + history metric + evidence count
+ *                             (from the v1.15 report, served by /report)
+ *   2. Narrative            — 3-section text (summary / findings /
+ *                             hypotheses) from /narrative
+ *   3. Timeline             — ordered events (detected / escalated /
+ *                             recovered / recurred) from /timeline
+ *   4. Evidence             — full kind / message / confidence detail
+ *                             list from /report (report.evidence)
+ *   5. Recommended Actions  — deterministic next-step list from /actions
  *
- * Silently degrades to null display on failure.
+ * Concurrency rules (delegated to the useInvestigationWorkspace hook):
+ *   - cancelled flag on incidentKey change (no stale setState)
+ *   - error isolation per endpoint (one failure ≠ all fail)
+ *   - four endpoints issued in parallel; no waiting
+ *
+ * Read-only — no mutation, no execute-action button, no scheduler.
+ * The Workspace is purely presentational: data fetch lives in the
+ * hook; section rendering lives in inner components below.
  */
-function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
-  const [report, setReport] = useState<import('../lib/api').IncidentInvestigationReportDto | null>(null);
-  const [actions, setActions] = useState<import('../lib/api').IncidentRecommendedActionBundleDto | null>(null);
-  const [actionsErr, setActionsErr] = useState<string | null>(null);
-  const [narrative, setNarrative] = useState<import('../lib/api').IncidentInvestigationNarrativeDto | null>(null);
-  const [narrativeErr, setNarrativeErr] = useState<string | null>(null);
-  const [timeline, setTimeline] = useState<import('../lib/api').IncidentInvestigationTimelineDto | null>(null);
-  const [timelineErr, setTimelineErr] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.incidentReport(incidentKey)
-      .then((d) => { if (!cancelled) setReport(d); })
-      .catch((e) => { if (!cancelled) setErr(String(e)); });
-    // v1.16: lazily fetch recommended actions AFTER report arrives.
-    // We don't fetch actions until the report endpoint succeeds —
-    // otherwise we'd just 404 alongside the report anyway.
-    api.incidentActions(incidentKey)
-      .then((d) => { if (!cancelled) setActions(d); })
-      .catch((e) => { if (!cancelled) setActionsErr(String(e)); });
-    // v1.17: lazily fetch narrative (independent of report / actions).
-    api.incidentNarrative(incidentKey)
-      .then((d) => { if (!cancelled) setNarrative(d); })
-      .catch((e) => { if (!cancelled) setNarrativeErr(String(e)); });
-    // v1.18: lazily fetch timeline (independent of all others).
-    api.incidentTimeline(incidentKey)
-      .then((d) => { if (!cancelled) setTimeline(d); })
-      .catch((e) => { if (!cancelled) setTimelineErr(String(e)); });
-    return () => { cancelled = true; };
-  }, [incidentKey]);
+function InvestigationWorkspace({ incidentKey }: { incidentKey: string }) {
+  const {
+    report, reportErr,
+    actions, actionsErr,
+    narrative, narrativeErr,
+    timeline, timelineErr,
+  } = useInvestigationWorkspace(incidentKey);
 
-  if (err) return <p className="text-[10px] text-rose-600 mt-1">report: {err}</p>;
-  if (!report) return <p className="text-[10px] text-muted-foreground mt-1">loading report…</p>;
+  // Top-level fatal: only when report itself failed AND we have no
+  // data. We still render the other three sections independently —
+  // they don't require the report.
+  if (reportErr && !report) {
+    return (
+      <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
+        <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Investigation workspace
+        </h5>
+        <p className="text-[10px] text-rose-600 mt-1">report: {reportErr}</p>
+      </div>
+    );
+  }
 
-  const { investigation, history, evidence } = report;
-  const priorityTone = investigation.priority.priorityLevel === 'critical'
-    ? 'danger' : investigation.priority.priorityLevel === 'high' ? 'warning' : 'muted';
-  const recoveryPct = history.occurrenceCount > 0
-    ? Math.round((history.recoveredCount / history.occurrenceCount) * 100) : 0;
-  const avgLabel = history.averageDurationMs !== null ? formatDuration(history.averageDurationMs) : '—';
-  const maxConfidencePct = Math.round(evidence.confidence * 100);
-
-  const toneForActionPriority = (p: 'high' | 'medium' | 'low'): 'danger' | 'warning' | 'muted' =>
-    p === 'high' ? 'danger' : p === 'medium' ? 'warning' : 'muted';
+  if (!report) {
+    return (
+      <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
+        <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Investigation workspace
+        </h5>
+        <p className="text-[10px] text-muted-foreground mt-1">loading workspace…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="mt-1 rounded border border-border/60 bg-background/40 p-2">
       <h5 className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        Investigation report
+        Incident investigation
       </h5>
+      <InvestigationSummarySection report={report} />
+      <InvestigationNarrativeSection narrative={narrative} err={narrativeErr} />
+      <InvestigationTimelineSection timeline={timeline} err={timelineErr} />
+      <InvestigationEvidenceSection report={report} />
+      <InvestigationActionsSection actions={actions} err={actionsErr} />
+    </div>
+  );
+}
+
+/* ---- v1.19 Section 1: Summary (priority + history + evidence metric) ---- */
+
+function InvestigationSummarySection({
+  report,
+}: {
+  report: import('../lib/api').IncidentInvestigationReportDto;
+}) {
+  const { investigation, history, evidence } = report;
+  const priorityTone =
+    investigation.priority.priorityLevel === 'critical'
+      ? 'danger'
+      : investigation.priority.priorityLevel === 'high'
+        ? 'warning'
+        : 'muted';
+  const recoveryPct =
+    history.occurrenceCount > 0
+      ? Math.round((history.recoveredCount / history.occurrenceCount) * 100)
+      : 0;
+  const avgLabel =
+    history.averageDurationMs !== null ? formatDuration(history.averageDurationMs) : '—';
+  const maxConfidencePct = Math.round(evidence.confidence * 100);
+
+  return (
+    <>
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Summary
+      </h6>
       <ul className="mt-1 space-y-0.5 text-[10px]">
         <li className="flex items-baseline gap-2">
           <Badge tone={priorityTone} className="shrink-0 uppercase">priority</Badge>
@@ -1299,40 +1336,28 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
           </span>
         </li>
       </ul>
-      {/* v1.16: Recommended Actions — derived from the report above. */}
+    </>
+  );
+}
+
+/* ---- v1.19 Section 2: Narrative (3-section text) ---- */
+
+function InvestigationNarrativeSection({
+  narrative,
+  err,
+}: {
+  narrative: import('../lib/api').IncidentInvestigationNarrativeDto | null;
+  err: string | null;
+}) {
+  return (
+    <>
       <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Suggested next steps
+        Narrative
       </h6>
-      {actionsErr && (
-        <p className="text-[10px] text-rose-600 mt-1">actions: {actionsErr}</p>
+      {err && (
+        <p className="text-[10px] text-rose-600 mt-1">narrative: {err}</p>
       )}
-      {!actions && !actionsErr && (
-        <p className="text-[10px] text-muted-foreground mt-1">loading actions…</p>
-      )}
-      {actions && actions.hasActions && (
-        <ul className="mt-1 space-y-0.5">
-          {actions.actions.map((a, i) => (
-            <li key={`${a.type}-${i}`} className="flex items-baseline gap-2 text-[10px]">
-              <Badge tone={toneForActionPriority(a.priority)} className="shrink-0 uppercase">
-                {a.priority}
-              </Badge>
-              <span className="shrink-0 uppercase text-muted-foreground">{a.type}</span>
-              <span className="flex-1 text-foreground/90">{a.reason}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {actions && !actions.hasActions && (
-        <p className="text-[10px] text-muted-foreground mt-1">no suggested actions for this incident.</p>
-      )}
-      {/* v1.17: Investigation narrative — 3-section text (summary / findings / hypotheses). */}
-      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Investigation narrative
-      </h6>
-      {narrativeErr && (
-        <p className="text-[10px] text-rose-600 mt-1">narrative: {narrativeErr}</p>
-      )}
-      {!narrative && !narrativeErr && (
+      {!narrative && !err && (
         <p className="text-[10px] text-muted-foreground mt-1">loading narrative…</p>
       )}
       {narrative && (
@@ -1363,14 +1388,28 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
           )}
         </div>
       )}
-      {/* v1.18: Investigation timeline — ordered events (detected / escalated / recovered / recurred). */}
+    </>
+  );
+}
+
+/* ---- v1.19 Section 3: Timeline (ordered events) ---- */
+
+function InvestigationTimelineSection({
+  timeline,
+  err,
+}: {
+  timeline: import('../lib/api').IncidentInvestigationTimelineDto | null;
+  err: string | null;
+}) {
+  return (
+    <>
       <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-        Investigation timeline
+        Timeline
       </h6>
-      {timelineErr && (
-        <p className="text-[10px] text-rose-600 mt-1">timeline: {timelineErr}</p>
+      {err && (
+        <p className="text-[10px] text-rose-600 mt-1">timeline: {err}</p>
       )}
-      {!timeline && !timelineErr && (
+      {!timeline && !err && (
         <p className="text-[10px] text-muted-foreground mt-1">loading timeline…</p>
       )}
       {timeline && timeline.events.length === 0 && (
@@ -1380,10 +1419,13 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
         <ul className="mt-1 space-y-0.5">
           {timeline.events.map((ev, i) => {
             const tone =
-              ev.type === 'detected' ? 'info' :
-              ev.type === 'escalated' ? 'danger' :
-              ev.type === 'recovered' ? 'success' :
-              'warning';
+              ev.type === 'detected'
+                ? 'info'
+                : ev.type === 'escalated'
+                  ? 'danger'
+                  : ev.type === 'recovered'
+                    ? 'success'
+                    : 'warning';
             const ts = ev.timestamp.slice(11, 19); // HH:MM:SS
             return (
               <li key={`${ev.type}-${i}`} className="flex items-baseline gap-2 text-[10px]">
@@ -1395,7 +1437,90 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
           })}
         </ul>
       )}
-    </div>
+    </>
+  );
+}
+
+/* ---- v1.19 Section 4: Evidence (full kind / message / confidence list) ---- */
+
+function InvestigationEvidenceSection({
+  report,
+}: {
+  report: import('../lib/api').IncidentInvestigationReportDto;
+}) {
+  const { evidence } = report;
+  const toneForConfidence = (
+    c: number,
+  ): 'muted' | 'info' | 'warning' | 'danger' | 'success' =>
+    c >= 0.85 ? 'success' : c >= 0.6 ? 'info' : c >= 0.3 ? 'warning' : 'muted';
+
+  return (
+    <>
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Evidence
+      </h6>
+      {evidence.evidence.length === 0 && (
+        <p className="text-[10px] text-muted-foreground mt-1">no evidence for this incident.</p>
+      )}
+      {evidence.evidence.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {evidence.evidence.map((item, i) => (
+            <li key={`${item.kind}-${i}`} className="flex items-baseline gap-2 text-[10px]">
+              <Badge tone={toneForConfidence(item.confidence)} className="shrink-0 uppercase">
+                {item.kind}
+              </Badge>
+              <span className="flex-1 text-foreground/90">{item.message}</span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {Math.round(item.confidence * 100)}%
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/* ---- v1.19 Section 5: Recommended Actions ---- */
+
+function InvestigationActionsSection({
+  actions,
+  err,
+}: {
+  actions: import('../lib/api').IncidentRecommendedActionBundleDto | null;
+  err: string | null;
+}) {
+  const toneForActionPriority = (p: 'high' | 'medium' | 'low'): 'danger' | 'warning' | 'muted' =>
+    p === 'high' ? 'danger' : p === 'medium' ? 'warning' : 'muted';
+
+  return (
+    <>
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Recommended actions
+      </h6>
+      {err && (
+        <p className="text-[10px] text-rose-600 mt-1">actions: {err}</p>
+      )}
+      {!actions && !err && (
+        <p className="text-[10px] text-muted-foreground mt-1">loading actions…</p>
+      )}
+      {actions && actions.hasActions && (
+        <ul className="mt-1 space-y-0.5">
+          {actions.actions.map((a, i) => (
+            <li key={`${a.type}-${i}`} className="flex items-baseline gap-2 text-[10px]">
+              <Badge tone={toneForActionPriority(a.priority)} className="shrink-0 uppercase">
+                {a.priority}
+              </Badge>
+              <span className="shrink-0 uppercase text-muted-foreground">{a.type}</span>
+              <span className="flex-1 text-foreground/90">{a.reason}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {actions && !actions.hasActions && (
+        <p className="text-[10px] text-muted-foreground mt-1">no suggested actions for this incident.</p>
+      )}
+    </>
   );
 }
 
