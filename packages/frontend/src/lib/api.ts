@@ -713,6 +713,26 @@ export interface IncidentInvestigationNarrativeDto {
   generatedAt: string;
 }
 
+/* v1.18: Incident Investigation Timeline */
+
+export type IncidentInvestigationTimelineEventTypeDto =
+  | 'detected'
+  | 'escalated'
+  | 'recovered'
+  | 'recurred';
+
+export interface IncidentInvestigationTimelineEventDto {
+  timestamp: string;
+  type: IncidentInvestigationTimelineEventTypeDto;
+  message: string;
+}
+
+export interface IncidentInvestigationTimelineDto {
+  incidentKey: string;
+  events: IncidentInvestigationTimelineEventDto[];
+  generatedAt: string;
+}
+
 /* v1.10: Incident Temporal Intelligence */
 
 export type TrendDirection = 'improving' | 'stable' | 'degrading' | 'no-data';
@@ -1175,6 +1195,10 @@ export const api = {
   incidentNarrative: (incidentKey: string) =>
     http<IncidentInvestigationNarrativeDto>(
       `/api/incidents/${encodeURIComponent(incidentKey)}/narrative`,
+    ),
+  incidentTimeline: (incidentKey: string) =>
+    http<IncidentInvestigationTimelineDto>(
+      `/api/incidents/${encodeURIComponent(incidentKey)}/timeline`,
     ),
   agentsReliability: () =>
     http<AgentReliabilitySummaryDto[]>('/api/agents/reliability'),

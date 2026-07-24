@@ -56,6 +56,7 @@ import { buildRootCauseEvidence } from './incident-evidence.js';
 import { buildInvestigationReport } from './incident-report.js';
 import { buildRecommendedActions } from './incident-actions.js';
 import { buildInvestigationNarrative } from './incident-narrative.js';
+import { buildInvestigationTimeline } from './incident-timeline.js';
 
 export function registerRoutes(
   app: FastifyInstance,
@@ -1591,6 +1592,28 @@ export function registerRoutes(
         return reply.code(404).send({ error: 'failed to assemble narrative' });
       }
       return narrative;
+    },
+  );
+
+  // v1.18: Ordered timeline of lifecycle events for a single incident.
+  // Pure deterministic projection over the IncidentInvestigationReport
+  // (v1.15) fields — no DB writes, no LLM, no scheduler.
+  app.get<{ Params: { incidentKey: string } }>(
+    '/api/incidents/:incidentKey/timeline',
+    async (req, reply) => {
+      const incidentKey = decodeURIComponent(req.params.incidentKey);
+      if (!parseIncidentKey(incidentKey)) {
+        return reply.code(400).send({ error: 'invalid incidentKey format (expected `executionId|kind`)' });
+      }
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
+      const report = await buildReportForIncident(incidentKey, now);
+      if (!report) return reply.code(404).send({ error: 'incident not found or no matching priority' });
+      const timeline = buildInvestigationTimeline({ report, nowIso });
+      if (!timeline) {
+        return reply.code(404).send({ error: 'failed to assemble timeline' });
+      }
+      return timeline;
     },
   );
 

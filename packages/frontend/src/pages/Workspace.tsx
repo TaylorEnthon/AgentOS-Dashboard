@@ -1226,6 +1226,8 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
   const [actionsErr, setActionsErr] = useState<string | null>(null);
   const [narrative, setNarrative] = useState<import('../lib/api').IncidentInvestigationNarrativeDto | null>(null);
   const [narrativeErr, setNarrativeErr] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<import('../lib/api').IncidentInvestigationTimelineDto | null>(null);
+  const [timelineErr, setTimelineErr] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1242,6 +1244,10 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
     api.incidentNarrative(incidentKey)
       .then((d) => { if (!cancelled) setNarrative(d); })
       .catch((e) => { if (!cancelled) setNarrativeErr(String(e)); });
+    // v1.18: lazily fetch timeline (independent of all others).
+    api.incidentTimeline(incidentKey)
+      .then((d) => { if (!cancelled) setTimeline(d); })
+      .catch((e) => { if (!cancelled) setTimelineErr(String(e)); });
     return () => { cancelled = true; };
   }, [incidentKey]);
 
@@ -1356,6 +1362,38 @@ function InvestigationReportBlock({ incidentKey }: { incidentKey: string }) {
             </div>
           )}
         </div>
+      )}
+      {/* v1.18: Investigation timeline — ordered events (detected / escalated / recovered / recurred). */}
+      <h6 className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Investigation timeline
+      </h6>
+      {timelineErr && (
+        <p className="text-[10px] text-rose-600 mt-1">timeline: {timelineErr}</p>
+      )}
+      {!timeline && !timelineErr && (
+        <p className="text-[10px] text-muted-foreground mt-1">loading timeline…</p>
+      )}
+      {timeline && timeline.events.length === 0 && (
+        <p className="text-[10px] text-muted-foreground mt-1">no timeline events for this incident.</p>
+      )}
+      {timeline && timeline.events.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {timeline.events.map((ev, i) => {
+            const tone =
+              ev.type === 'detected' ? 'info' :
+              ev.type === 'escalated' ? 'danger' :
+              ev.type === 'recovered' ? 'success' :
+              'warning';
+            const ts = ev.timestamp.slice(11, 19); // HH:MM:SS
+            return (
+              <li key={`${ev.type}-${i}`} className="flex items-baseline gap-2 text-[10px]">
+                <span className="shrink-0 tabular-nums font-mono text-muted-foreground/80">{ts}</span>
+                <Badge tone={tone} className="shrink-0 uppercase">{ev.type}</Badge>
+                <span className="flex-1 text-foreground/90">{ev.message}</span>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
